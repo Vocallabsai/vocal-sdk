@@ -1,0 +1,70 @@
+{
+  "name": "vocal-native-sdk",
+  "version": "1.0.0",
+  "description": "React Native SDK for VocalLabs audio calls with direct WebSocket connection",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "npx tsc",
+    "watch": "npx tsc --watch",
+    "prepare": "npm run build",
+    "clean": "rm -rf lib",
+    "test": "npm run build && node test.js",
+    "test:quick": "node test.js",
+    "postinstall": "npm run build || true"
+  },
+  "keywords": [
+    "react-native",
+    "audio",
+    "calls",
+    "webrtc",
+    "voice",
+    "communication",
+    "sdk"
+  ],
+  "author": "Subspace",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=16.8.0",
+    "react-native": ">=0.60.0",
+    "react-native-audio-api": ">=0.3.0",
+    "react-native-live-audio-stream": ">=2.5.0",
+    "base-64": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    },
+    "react-native-audio-api": {
+      "optional": false
+    },
+    "react-native-live-audio-stream": {
+      "optional": false
+    },
+    "base-64": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "node-fetch": "^2.6.7"
+  },
+  "files": [
+    "lib",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/vocal-native-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/vocal-native-sdk/issues"
+  },
+  "homepage": "https://github.com/yourusername/vocal-native-sdk#readme"
+}
