@@ -394,7 +394,7 @@ export class AudioQueueService {
     }
   }
 
-  handleWebSocketMessage(event: MessageEvent): void {
+  handleWebSocketMessage(event: any): void {
     try {
       const message: WebSocketMessage = JSON.parse(event.data as string);
       
@@ -616,7 +616,7 @@ export class AudioQueueService {
       this.updateConnectionState(true);
     };
     
-    this.ws.onmessage = (event: MessageEvent) => {
+    this.ws.onmessage = (event: any) => {
       this.handleWebSocketMessage(event);
     };
     
