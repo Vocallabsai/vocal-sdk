@@ -1,11 +1,11 @@
 {
-  "name": "vocal-native-sdk",
+  "name": "vocallabsai-sdk",
   "version": "1.0.1",
   "description": "React Native SDK for VocalLabs audio calls with direct WebSocket connection",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
-    "build": "npx tsc",
+    "build": "tsc",
     "watch": "npx tsc --watch",
     "prepare": "npm run build",
     "clean": "rm -rf lib",
@@ -31,7 +31,7 @@
     "react": ">=16.8.0",
     "react-native": ">=0.60.0",
     "react-native-audio-api": ">=0.3.0",
-    "react-native-live-audio-stream": ">=2.5.0",
+    "react-native-live-audio-stream": ">=1.0.0",
     "base-64": ">=1.0.0"
   },
   "peerDependenciesMeta": {
@@ -64,7 +64,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Vocallabsai/vocal-sdk.git"
+    "url": "git+https://github.com/Vocallabsai/vocal-sdk.git"
   },
   "bugs": {
     "url": "https://github.com/Vocallabsai/vocal-sdk/issues"
