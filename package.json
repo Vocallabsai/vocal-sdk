@@ -1,6 +1,6 @@
 {
   "name": "vocallabsai-sdk",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "React Native SDK for VocalLabs audio calls with direct WebSocket connection",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
