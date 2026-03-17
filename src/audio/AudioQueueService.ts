@@ -57,6 +57,8 @@ type UserConnectedCallback = (connected: boolean) => void;
 
 class ReactNativeAudioQueue {
   private sampleRate: number;
+  private outputSampleRate: number;
+  private shouldResamplePlayback: boolean;
   private audioContext: AudioContext | null;
   private currentSourceNode: AudioBufferSourceNode | null;
   private gainNode: GainNode | null;
@@ -81,6 +83,8 @@ class ReactNativeAudioQueue {
 
   constructor(sampleRate: number = 8000) {
     this.sampleRate = sampleRate;
+    this.outputSampleRate = sampleRate;
+    this.shouldResamplePlayback = false;
     this.audioContext = null;
     this.currentSourceNode = null;
     this.gainNode = null;
@@ -105,6 +109,17 @@ class ReactNativeAudioQueue {
       this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
       if (this.audioContext.state === 'suspended') {
         await this.audioContext.resume();
+      }
+
+      this.outputSampleRate = this.audioContext.sampleRate || this.sampleRate;
+      this.shouldResamplePlayback = this.outputSampleRate !== this.sampleRate;
+
+      if (this.shouldResamplePlayback) {
+        console.warn(
+          `⚠️ AudioContext ignored requested ${this.sampleRate}Hz and created ${this.outputSampleRate}Hz output. Resampling playback.`
+        );
+      } else {
+        console.log(`✅ AudioContext created at requested ${this.sampleRate}Hz`);
       }
 
       this.gainNode = this.audioContext.createGain();
@@ -155,9 +170,19 @@ class ReactNativeAudioQueue {
     if (!this.audioContext) return;
 
     const ctx = this.audioContext;
+    const actualRate = this.shouldResamplePlayback
+      ? this.outputSampleRate
+      : (ctx.sampleRate || this.sampleRate);
+    const samples = this.shouldResamplePlayback
+      ? this.resamplePCMData(pcmFloat32, this.sampleRate, actualRate)
+      : pcmFloat32;
 
-    const buffer = ctx.createBuffer(1, pcmFloat32.length, ctx.sampleRate);
-    buffer.copyToChannel(pcmFloat32, 0);
+    const buffer = ctx.createBuffer(1, samples.length, actualRate);
+    try {
+      buffer.copyToChannel(samples, 0);
+    } catch {
+      (buffer as any).copyToChannel(Array.from(samples), 0);
+    }
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
@@ -171,6 +196,35 @@ class ReactNativeAudioQueue {
     source.onended = () => {
       this.processQueue();
     };
+  }
+
+  private resamplePCMData(
+    pcmFloat32: Float32Array,
+    inputSampleRate: number,
+    outputSampleRate: number
+  ): Float32Array {
+    if (
+      pcmFloat32.length === 0 ||
+      inputSampleRate <= 0 ||
+      outputSampleRate <= 0 ||
+      inputSampleRate === outputSampleRate
+    ) {
+      return pcmFloat32;
+    }
+
+    const ratio = outputSampleRate / inputSampleRate;
+    const newLength = Math.max(1, Math.round(pcmFloat32.length * ratio));
+    const resampled = new Float32Array(newLength);
+
+    for (let i = 0; i < newLength; i++) {
+      const srcIndex = i / ratio;
+      const low = Math.floor(srcIndex);
+      const high = Math.min(low + 1, pcmFloat32.length - 1);
+      const t = srcIndex - low;
+      resampled[i] = pcmFloat32[low] * (1 - t) + pcmFloat32[high] * t;
+    }
+
+    return resampled;
   }
 
   processQueue() {
@@ -610,6 +664,9 @@ export class AudioQueueService {
 
     console.log(`🔗 Connecting to WebSocket for call ${callId}: ${wsUrl}`);
     this.ws = new WebSocket(wsUrl);
+    const currentWs = this.ws;
+    let socketClosed = false;
+    let closeCode: number | null = null;
     
     this.ws.onopen = () => {
       console.log('✅ WebSocket connected');
@@ -622,6 +679,8 @@ export class AudioQueueService {
     
     this.ws.onclose = (event: any) => {
       console.log(`❌ WebSocket disconnected: ${event.code} ${event.reason}`);
+      socketClosed = true;
+      closeCode = typeof event?.code === 'number' ? event.code : null;
       if (this.isRecording) {
         this.stopRecording();
       }
@@ -633,7 +692,21 @@ export class AudioQueueService {
       if (this.isRecording) {
         this.stopRecording();
       }
-      this.updateConnectionState(false);
+
+      setTimeout(() => {
+        if (this.ws !== currentWs) {
+          return;
+        }
+
+        const isNormalNoStatusClose = socketClosed && closeCode === 1005;
+        const alreadyDisconnected = !this.isConnected || this.ws?.readyState === WebSocket.CLOSED;
+
+        if (isNormalNoStatusClose || alreadyDisconnected) {
+          return;
+        }
+
+        this.updateConnectionState(false);
+      }, 75);
     };
   }
 
