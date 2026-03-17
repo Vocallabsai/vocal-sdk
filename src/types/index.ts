@@ -40,9 +40,8 @@ export interface SendingStats {
 }
 
 export interface AudioConnectionOptions {
-  callId: string;
   sampleRate?: number;
-  wsUrl?: string;
+  wsUrl: string;
 }
 
 // ============= Event Callbacks =============

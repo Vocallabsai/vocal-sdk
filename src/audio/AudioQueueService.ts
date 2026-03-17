@@ -516,7 +516,7 @@ export class AudioQueueService {
         bitsPerSample: 16,
         wavFile: 'audio.wav',
         bufferSize: 320,
-        audioSource: 6, // VOICE_COMMUNICATION for echo cancellation
+        audioSource: 7, // VOICE_COMMUNICATION for echo cancellation
       };
 
       LiveAudioStream.init(options);
@@ -653,7 +653,7 @@ export class AudioQueueService {
     }
   }
 
-  async connectWithCustomUrl(callId: string, sampleRate: number, wsUrl: string): Promise<void> {
+  async connectWithCustomUrl(sampleRate: number, wsUrl: string): Promise<void> {
     this.sampleRate = sampleRate;
     
     if (this.audioQueue) {
@@ -662,7 +662,7 @@ export class AudioQueueService {
     this.initializeAudioQueue();
     this.hasReceivedFirstData = false;
 
-    console.log(`🔗 Connecting to WebSocket for call ${callId}: ${wsUrl}`);
+    console.log(`🔗 Connecting to WebSocket: ${wsUrl}`);
     this.ws = new WebSocket(wsUrl);
     const currentWs = this.ws;
     let socketClosed = false;
@@ -671,6 +671,33 @@ export class AudioQueueService {
     this.ws.onopen = () => {
       console.log('✅ WebSocket connected');
       this.updateConnectionState(true);
+      
+      // Send initial events after connection
+      try {
+        // Send start event
+        const startEvent = {
+          event: 'start',
+          start: {
+            streamId: 'inbound',
+            mediaFormat: {
+              Encoding: 'audio/x-l16',
+              sampleRate: sampleRate
+            }
+          }
+        };
+        this.ws?.send(JSON.stringify(startEvent));
+        console.log('📤 Sent start event');
+        
+        // Send hangup_source event
+        const hangupEvent = {
+          event: 'hangup_source',
+          source: 'in_progress'
+        };
+        this.ws?.send(JSON.stringify(hangupEvent));
+        console.log('📤 Sent hangup_source event');
+      } catch (error) {
+        console.error('❌ Error sending initial events:', error);
+      }
     };
     
     this.ws.onmessage = (event: any) => {
@@ -710,11 +737,7 @@ export class AudioQueueService {
     };
   }
 
-  async connectMobile(callId: string, sampleRate: number = 8000): Promise<boolean> {
-    const wsUrl = `wss://rupture2.vocallabs.ai/ws?callId=${callId}&sampleRate=${sampleRate}`;
-    await this.connectWithCustomUrl(callId, sampleRate, wsUrl);
-    return true;
-  }
+
 
   disconnect(): void {
     console.log('🔌 Disconnecting...');

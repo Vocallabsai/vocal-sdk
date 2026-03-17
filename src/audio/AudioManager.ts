@@ -98,20 +98,14 @@ export class AudioManager {
       );
     }
 
-    this.logger.info(`Connecting audio for call: ${options.callId}`);
+    this.logger.info(`Connecting to websocket: ${options.wsUrl}`);
 
     try {
       const sampleRate = options.sampleRate || this.sampleRate;
-
-      if (options.wsUrl) {
-        await this.audioService.connectWithCustomUrl(
-          options.callId,
-          sampleRate,
-          options.wsUrl
-        );
-      } else {
-        await this.audioService.connectMobile(options.callId, sampleRate);
-      }
+      await this.audioService.connectWithCustomUrl(
+        sampleRate,
+        options.wsUrl
+      );
 
       this.logger.info('✅ Audio connection successful');
 

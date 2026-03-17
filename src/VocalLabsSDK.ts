@@ -11,8 +11,10 @@
  *   enableLogs: true,
  * });
  * 
- * // Connect directly with call ID and websocket URL
- * await sdk.connect('call-id-123', 'wss://example.com/ws/call-id-123');
+ * // Connect with websocket URL
+ * await sdk.connect('wss://call.vocallabs.ai/ws/?agent=..._callId_web_8000');
+ * // or
+ * await sdk.connect('wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000');
  * 
  * // Toggle mute
  * sdk.toggleMute();
@@ -127,55 +129,61 @@ export class VocalLabsSDK {
   }
 
   /**
-   * Connect directly to a call using call ID and/or websocket URL
-   * Provide either callId, websocketUrl, or both.
+   * Connect directly to a call using websocket URL
    * 
-   * @param options - Connection options
-   * @param options.callId - Optional: The call ID to connect to
-   * @param options.websocketUrl - Optional: The websocket URL for the call
+   * @param websocketUrl - The websocket URL for the call (required)
    */
-  async connect(options: { callId?: string; websocketUrl?: string }): Promise<void> {
+  async connect(websocketUrl: string): Promise<void> {
     try {
       if (!this.state.isInitialized) {
         throw new SDKError('SDK not initialized', ErrorCode.NOT_INITIALIZED);
       }
 
-      let { callId, websocketUrl } = options;
-
-      // Check if both are missing
-      if (!callId && !websocketUrl) {
+      if (!websocketUrl) {
         throw new SDKError(
-          'Either callId or websocketUrl must be provided',
+          'WebsocketUrl must be provided',
           ErrorCode.INVALID_CONFIG
         );
       }
 
-      // If callId is missing, try to extract from websocketUrl
-      if (!callId && websocketUrl) {
-        try {
-          const url = new URL(websocketUrl);
-          const callIdParam = url.searchParams.get('callId');
-          callId = callIdParam || `call-${Date.now()}`;
+      // Extract callId from websocketUrl if possible
+      let callId = `call-${Date.now()}`;
+      try {
+        const url = new URL(websocketUrl);
+        
+        // Try to extract from callId parameter first
+        let callIdParam = url.searchParams.get('callId');
+        if (callIdParam) {
+          callId = callIdParam;
           this.logger.info(`Extracted callId from URL: ${callId}`);
-        } catch (e) {
-          callId = `call-${Date.now()}`;
-          this.logger.warning('Could not parse URL, using generated callId');
+        } else {
+          // Try to extract from agent parameter (format: <something>_<callId>_web_<sampleRate>)
+          const agentParam = url.searchParams.get('agent');
+          if (agentParam) {
+            const parts = agentParam.split('_');
+            if (parts.length >= 2) {
+              // The callId is the second part (index 1)
+              callId = parts[1];
+              this.logger.info(`Extracted callId from agent parameter: ${callId}`);
+            }
+          }
         }
+      } catch (e) {
+        this.logger.warning('Could not parse URL, using generated callId');
       }
 
       this.logger.info(`Connecting to call: ${callId}`);
 
       // Set current call
       const callData: CallData = {
-        call_id: callId!,
-        websocket: websocketUrl || '',
+        call_id: callId,
+        websocket: websocketUrl,
       };
       this.callManager.setCurrentCall(callData);
-      this.state.currentCallId = callId!;
+      this.state.currentCallId = callId;
 
-      // Connect audio with whatever we have
+      // Connect audio with websocket URL
       await this.audioManager.connect({
-        callId: callId!,
         sampleRate: this.config.sampleRate,
         wsUrl: websocketUrl,
       });
