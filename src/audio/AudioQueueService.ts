@@ -49,6 +49,7 @@ interface AudioStreamOptions {
 }
 
 type LogType = 'info' | 'error' | 'warning';
+type AudioFormat = 'audio/x-l16' | 'audio/x-mulaw';
 type StatsCallback = (stats: { sentChunks: number; receivedChunks: number; queueSize: number }) => void;
 type LogCallback = (message: string, type: LogType) => void;
 type ConnectionCallback = (connected: boolean) => void;
@@ -80,6 +81,7 @@ class ReactNativeAudioQueue {
   // Mobile-specific optimizations
   public maxQueueSize: number = 20;
   public isLowLatencyMode: boolean = false;
+  private audioFormat: AudioFormat = 'audio/x-l16';
 
   constructor(sampleRate: number = 8000) {
     this.sampleRate = sampleRate;
@@ -258,33 +260,69 @@ class ReactNativeAudioQueue {
   base64ToPCMData(base64Audio: string): Float32Array | null {
     try {
       const binaryString = atob(base64Audio);
-      const byteLength = binaryString.length;
       
-      if (byteLength % 2 === 0) {
-        const samples = byteLength / 2;
-        const floatArray = new Float32Array(samples);
+      if (this.audioFormat === 'audio/x-mulaw') {
+        // μ-law decoding (ITU-T G.711)
+        const floatArray = new Float32Array(binaryString.length);
+        const ULAW_BIAS = 33;
         
-        for (let i = 0; i < samples; i++) {
-          const byteIndex = i * 2;
-          const sample = (binaryString.charCodeAt(byteIndex + 1) << 8) | binaryString.charCodeAt(byteIndex);
-          const signedSample = sample > 32767 ? sample - 65536 : sample;
-          floatArray[i] = signedSample / 32768.0;
+        for (let i = 0; i < binaryString.length; i++) {
+          let ulawByte = binaryString.charCodeAt(i);
+          // Invert all bits
+          ulawByte = ~ulawByte & 0xff;
+          
+          // Extract sign bit (MSB)
+          const sign = ulawByte & 0x80;
+          // Extract exponent (3 bits)
+          const exponent = (ulawByte >> 4) & 0x07;
+          // Extract mantissa (4 bits)
+          const mantissa = ulawByte & 0x0f;
+          
+          // Reconstruct the linear value
+          let sample = mantissa << (exponent + 3);
+          sample += ULAW_BIAS << exponent;
+          
+          // Apply sign
+          sample = sign !== 0 ? -sample : sample;
+          
+          floatArray[i] = sample / 32768.0;
         }
         
         return floatArray;
       } else {
-        const floatArray = new Float32Array(byteLength);
-        for (let i = 0; i < byteLength; i++) {
-          floatArray[i] = (binaryString.charCodeAt(i) - 128) / 128.0;
-        }
+        // L16 (Linear PCM) decoding
+        const byteLength = binaryString.length;
         
-        return floatArray;
+        if (byteLength % 2 === 0) {
+          const samples = byteLength / 2;
+          const floatArray = new Float32Array(samples);
+          
+          for (let i = 0; i < samples; i++) {
+            const byteIndex = i * 2;
+            const sample = (binaryString.charCodeAt(byteIndex + 1) << 8) | binaryString.charCodeAt(byteIndex);
+            const signedSample = sample > 32767 ? sample - 65536 : sample;
+            floatArray[i] = signedSample / 32768.0;
+          }
+          
+          return floatArray;
+        } else {
+          const floatArray = new Float32Array(byteLength);
+          for (let i = 0; i < byteLength; i++) {
+            floatArray[i] = (binaryString.charCodeAt(i) - 128) / 128.0;
+          }
+          
+          return floatArray;
+        }
       }
       
     } catch (error) {
       console.error('❌ Error converting base64 to PCM:', error);
       return null;
     }
+  }
+
+  setAudioFormat(format: AudioFormat): void {
+    this.audioFormat = format;
   }
 
   setVolume(volume: number): void {
@@ -352,6 +390,8 @@ export class AudioQueueService {
   private sentChunks: number;
   private lastSentTime: number;
   private totalSentBytes: number;
+  private audioFormat: AudioFormat = 'audio/x-l16';
+  private sendingFormat: AudioFormat = 'audio/x-l16';
   
   // Callbacks
   private statsCallback: StatsCallback | null;
@@ -461,7 +501,18 @@ export class AudioQueueService {
             this.userConnectedCallback(true);
           }
         }
+        
+        // Detect and set audio format
+        const contentType = message.media.contentType as AudioFormat || 'audio/x-l16';
+        this.audioFormat = contentType;
+        if (this.audioQueue) {
+          this.audioQueue.setAudioFormat(contentType);
+        }
+        
+        console.log('🔊 Audio chunk received, payload size:', message.media.payload.length);
+        console.log('📝 Adding chunk to playback queue');
         this.audioQueue.addChunk(message.media.payload);
+        console.log('✓ Chunk added to playback queue');
         this.updateStats();
       }
     } catch (error) {
@@ -653,8 +704,11 @@ export class AudioQueueService {
     }
   }
 
-  async connectWithCustomUrl(sampleRate: number, wsUrl: string): Promise<void> {
+  async connectWithCustomUrl(sampleRate: number, wsUrl: string, audioFormat: AudioFormat = 'audio/x-l16'): Promise<void> {
     this.sampleRate = sampleRate;
+    this.sendingFormat = audioFormat;
+    
+    console.log(`🎯 Requested sample rate: ${sampleRate}Hz`);
     
     if (this.audioQueue) {
       await this.audioQueue.dispose();
@@ -686,7 +740,7 @@ export class AudioQueueService {
           }
         };
         this.ws?.send(JSON.stringify(startEvent));
-        console.log('📤 Sent start event');
+        console.log(`📤 Sent start event with sample rate: ${sampleRate}Hz`);
         
         // Send hangup_source event
         const hangupEvent = {
@@ -741,6 +795,16 @@ export class AudioQueueService {
 
   disconnect(): void {
     console.log('🔌 Disconnecting...');
+    
+    // Send end event before closing
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ event: 'end', reason: 'user' }));
+        console.log('📤 Sent end event');
+      } catch (error) {
+        console.error('❌ Error sending end event:', error);
+      }
+    }
     
     if (this.ws) {
       this.ws.close();
