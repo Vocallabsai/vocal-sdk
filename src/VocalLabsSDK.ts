@@ -86,8 +86,7 @@ export class VocalLabsSDK {
     this.callManager = new CallManager(this.logger);
 
     this.audioManager = new AudioManager(
-      this.logger,
-      this.config.sampleRate
+      this.logger
     );
 
     this.setupAudioCallbacks();

@@ -6,13 +6,11 @@
 
 import { AudioStats, SendingStats, AudioConnectionOptions, SDKError, ErrorCode } from '../types';
 import { Logger } from '../utils/logger';
-import { DEFAULT_CONFIG } from '../config/constants';
 import { AudioQueueService } from './AudioQueueService';
 
 export class AudioManager {
   private audioService: AudioQueueService;
   private logger: Logger;
-  private sampleRate: number;
   private isInitialized: boolean = false;
   
   // Callbacks
@@ -22,9 +20,8 @@ export class AudioManager {
   private onUserConnectedCallback?: (connected: boolean) => void;
   private onStatsUpdateCallback?: (stats: { audio: AudioStats; sending: SendingStats }) => void;
 
-  constructor(logger: Logger, sampleRate: number = DEFAULT_CONFIG.SAMPLE_RATE) {
+  constructor(logger: Logger) {
     this.logger = logger;
-    this.sampleRate = sampleRate;
     
     // Auto-initialize built-in audio service
     this.audioService = new AudioQueueService();
@@ -101,9 +98,7 @@ export class AudioManager {
     this.logger.info(`Connecting to websocket: ${options.wsUrl}`);
 
     try {
-      const sampleRate = options.sampleRate || this.sampleRate;
       await this.audioService.connectWithCustomUrl(
-        sampleRate,
         options.wsUrl
       );
 
