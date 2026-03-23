@@ -4,6 +4,29 @@
  */
 
 declare module 'react-native-audio-api' {
+  export type IOSCategory = 'record' | 'ambient' | 'playback' | 'multiRoute' | 'soloAmbient' | 'playAndRecord';
+  export type IOSMode = 'default' | 'gameChat' | 'videoChat' | 'voiceChat' | 'measurement' | 'voicePrompt' | 'spokenAudio' | 'moviePlayback' | 'videoRecording';
+  export type IOSOption =
+    | 'duckOthers'
+    | 'allowAirPlay'
+    | 'mixWithOthers'
+    | 'defaultToSpeaker'
+    | 'allowBluetoothHFP'
+    | 'allowBluetoothA2DP'
+    | 'overrideMutedMicrophoneInterruption'
+    | 'interruptSpokenAudioAndMixWithOthers';
+
+  export interface SessionOptions {
+    iosMode?: IOSMode;
+    iosOptions?: IOSOption[];
+    iosCategory?: IOSCategory;
+    iosAllowHaptics?: boolean;
+  }
+
+  export interface PermissionStatus {
+    status: 'Undetermined' | 'Denied' | 'Granted';
+  }
+
   export class AudioContext {
     constructor(options?: { sampleRate?: number });
     readonly state: 'suspended' | 'running' | 'closed';
@@ -22,8 +45,45 @@ declare module 'react-native-audio-api' {
     readonly duration: number;
     readonly sampleRate: number;
     readonly numberOfChannels: number;
+    getChannelData(channel: number): Float32Array;
     copyToChannel(source: Float32Array, channelNumber: number, startInChannel?: number): void;
   }
+
+  export interface OnAudioReadyEventType {
+    buffer: AudioBuffer;
+    numFrames: number;
+    when: number;
+  }
+
+  export interface AudioRecorderCallbackOptions {
+    sampleRate: number;
+    bufferLength: number;
+    channelCount: number;
+  }
+
+  export type RecorderResult<T = {}> = ({ status: 'success' } & T) | { status: 'error'; message: string };
+
+  export class AudioRecorder {
+    constructor();
+    start(): RecorderResult<{ path: string }>;
+    stop(): RecorderResult<{ path: string; size: number; duration: number }>;
+    connect(node: AudioNode): void;
+    disconnect(): void;
+    clearOnAudioReady(): void;
+    clearOnError(): void;
+    onError(callback: (error: { message: string }) => void): void;
+    onAudioReady(
+      options: AudioRecorderCallbackOptions,
+      callback: (event: OnAudioReadyEventType) => void
+    ): RecorderResult<void>;
+  }
+
+  export const AudioManager: {
+    setAudioSessionOptions(options: SessionOptions): void;
+    setAudioSessionActivity(enabled: boolean): Promise<boolean>;
+    requestRecordingPermissions(): Promise<PermissionStatus>;
+    checkRecordingPermissions(): Promise<PermissionStatus>;
+  };
 
   export interface AudioNode {
     connect(destination: AudioNode | AudioDestinationNode): void;
@@ -45,24 +105,6 @@ declare module 'react-native-audio-api' {
 
   export interface AudioParam {
     value: number;
-  }
-}
-
-declare module 'react-native-live-audio-stream' {
-  export interface AudioStreamOptions {
-    sampleRate?: number;
-    channels?: number;
-    bitsPerSample?: number;
-    wavFile?: string;
-    bufferSize?: number;
-    audioSource?: number;
-  }
-
-  export default class LiveAudioStream {
-    static init(options: AudioStreamOptions): void;
-    static start(): void;
-    static stop(): void;
-    static on(event: 'data', callback: (data: string) => void): void;
   }
 }
 

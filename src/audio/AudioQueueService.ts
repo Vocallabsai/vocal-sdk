@@ -4,11 +4,10 @@
  * Handles WebSocket audio streaming, queue management, and recording
  */
 
-import { AudioContext, AudioBufferSourceNode, GainNode } from 'react-native-audio-api';
+import { AudioContext, AudioBuffer, AudioBufferSourceNode, GainNode, AudioRecorder, OnAudioReadyEventType, AudioManager, SessionOptions } from 'react-native-audio-api';
 import { Platform, PermissionsAndroid } from 'react-native';
-// @ts-ignore - dynamic import
-import LiveAudioStream from 'react-native-live-audio-stream';
 import { decode as atob, encode as btoa } from 'base-64';
+import { AudioProcessingConfig, AudioProcessingMode } from '../types';
 
 interface AudioStats {
   receivedChunks: number;
@@ -40,15 +39,6 @@ interface WebSocketMessage {
   };
 }
 
-interface AudioStreamOptions {
-  sampleRate?: number;
-  channels?: number;
-  bitsPerSample?: number;
-  wavFile?: string;
-  bufferSize?: number;
-  audioSource?: number;
-}
-
 type LogType = 'info' | 'error' | 'warning';
 type AudioFormat = 'audio/x-l16' | 'audio/x-mulaw';
 type StatsCallback = (stats: { sentChunks: number; receivedChunks: number; queueSize: number }) => void;
@@ -60,6 +50,8 @@ type UserConnectedCallback = (connected: boolean) => void;
 class ReactNativeAudioQueue {
   private static readonly INPUT_SAMPLE_RATE = 8000;
   private sampleRate: number;
+  private inputSampleRate: number;
+  private isLittleEndianL16: boolean;
   private audioContext: AudioContext | null;
   private initializePromise: Promise<void> | null;
   private currentSourceNode: AudioBufferSourceNode | null;
@@ -91,6 +83,8 @@ class ReactNativeAudioQueue {
 
   constructor(sampleRate: number = 8000) {
     this.sampleRate = sampleRate;
+    this.inputSampleRate = ReactNativeAudioQueue.INPUT_SAMPLE_RATE;
+    this.isLittleEndianL16 = false;
     this.audioContext = null;
     this.initializePromise = null;
     this.currentSourceNode = null;
@@ -341,11 +335,11 @@ class ReactNativeAudioQueue {
   }
 
   private convertForContextRate(input: Float32Array, contextRate: number): Float32Array {
-    if (input.length === 0 || contextRate <= 0 || contextRate === this.sampleRate) {
+    if (input.length === 0 || contextRate <= 0 || this.inputSampleRate <= 0 || contextRate === this.inputSampleRate) {
       return input;
     }
 
-    const ratio = contextRate / ReactNativeAudioQueue.INPUT_SAMPLE_RATE;
+    const ratio = contextRate / this.inputSampleRate;
 
     // Common mobile path: 8k -> 48k.
     if (ratio === 6) {
@@ -438,15 +432,14 @@ class ReactNativeAudioQueue {
         const floatArray = new Float32Array(bytes.length);
 
         for (let i = 0; i < bytes.length; i++) {
-          let mu = ~bytes[i] & 0xff;
-
-          const sign = (mu & 0x80) ? -1 : 1;
+          const mu = ~bytes[i] & 0xff;
+          const sign = mu & 0x80;
           const exponent = (mu >> 4) & 0x07;
-          const mantissa = mu & 0x0F;
+          const mantissa = mu & 0x0f;
 
-          // ✅ Correct G.711 decode
-          let sample = ((mantissa << 4) + 0x08) << exponent;
-          sample = sign * sample;
+          // ITU-T G.711 mu-law decode
+          let sample = ((mantissa << 3) + 0x84) << exponent;
+          sample = sign ? (0x84 - sample) : (sample - 0x84);
 
           floatArray[i] = sample / 32768;
         }
@@ -464,7 +457,9 @@ class ReactNativeAudioQueue {
         for (let i = 0; i < samples; i++) {
           const idx = i * 2;
 
-          const sample = (bytes[idx] << 8) | bytes[idx + 1];
+          const hi = this.isLittleEndianL16 ? bytes[idx + 1] : bytes[idx];
+          const lo = this.isLittleEndianL16 ? bytes[idx] : bytes[idx + 1];
+          const sample = (hi << 8) | lo;
           const signedSample = sample > 32767 ? sample - 65536 : sample;
 
           floatArray[i] = signedSample / 32768;
@@ -486,8 +481,34 @@ class ReactNativeAudioQueue {
     }
   }
 
-  setAudioFormat(format: AudioFormat): void {
-    this.audioFormat = format;
+  setAudioFormat(contentType: string, sampleRate?: number): void {
+    const normalizedContentType = (contentType || 'audio/x-l16').toLowerCase();
+
+    if (normalizedContentType.includes('mulaw') || normalizedContentType.includes('pcmu')) {
+      this.audioFormat = 'audio/x-mulaw';
+    } else {
+      this.audioFormat = 'audio/x-l16';
+    }
+
+    if (this.audioFormat === 'audio/x-l16') {
+      const isLittle =
+        normalizedContentType.includes('l16le') ||
+        normalizedContentType.includes('endian=little') ||
+        normalizedContentType.includes('endian=le');
+      this.isLittleEndianL16 = isLittle;
+    } else {
+      this.isLittleEndianL16 = false;
+    }
+
+    const rateMatch = normalizedContentType.match(/(?:rate|sample[-_]?rate)\s*=\s*(\d{4,6})/);
+    const parsedRate = rateMatch ? Number(rateMatch[1]) : NaN;
+    const candidateRate = typeof sampleRate === 'number' && sampleRate > 0 ? sampleRate : parsedRate;
+
+    if (Number.isFinite(candidateRate) && candidateRate >= 4000 && candidateRate <= 96000) {
+      this.inputSampleRate = candidateRate;
+    } else {
+      this.inputSampleRate = ReactNativeAudioQueue.INPUT_SAMPLE_RATE;
+    }
   }
 
   setVolume(volume: number): void {
@@ -560,7 +581,6 @@ export class AudioQueueService {
   private sentChunks: number;
   private lastSentTime: number;
   private totalSentBytes: number;
-  private lastLogTime: number = 0;
   private sendFrameCount: number = 0;
   
   // Callbacks
@@ -572,9 +592,59 @@ export class AudioQueueService {
   
   // Audio stream
   private audioStreamBuffer: any[];
+  private audioRecorder: AudioRecorder | null;
   private isAudioInitialized: boolean;
   private hasReceivedFirstData: boolean;
-  private audioDataHandler: ((data: string) => void) | null;
+  private lastRemoteAudioAt: number;
+  private dcBlockPrevX: number;
+  private dcBlockPrevY: number;
+  private audioProcessingConfig: Required<AudioProcessingConfig>;
+
+  private static readonly AUDIO_PROCESSING_PRESETS: Record<AudioProcessingMode, Required<AudioProcessingConfig>> = {
+    off: {
+      mode: 'off',
+      remoteActiveWindowMs: 250,
+      noiseGateQuiet: 0,
+      noiseGateRemote: 0,
+      halfDuplexRms: 1,
+      halfDuplexPeak: 1,
+      duckLow: 1,
+      duckHigh: 1,
+      duckPivotRms: 1,
+      dcBlockerR: 0.995,
+    },
+    balanced: {
+      mode: 'balanced',
+      remoteActiveWindowMs: 280,
+      noiseGateQuiet: 0.012,
+      noiseGateRemote: 0.022,
+      halfDuplexRms: 0.055,
+      halfDuplexPeak: 0.16,
+      duckLow: 0.35,
+      duckHigh: 0.58,
+      duckPivotRms: 0.085,
+      dcBlockerR: 0.995,
+    },
+    aggressive: {
+      mode: 'aggressive',
+      remoteActiveWindowMs: 360,
+      noiseGateQuiet: 0.015,
+      noiseGateRemote: 0.028,
+      halfDuplexRms: 0.07,
+      halfDuplexPeak: 0.2,
+      duckLow: 0.22,
+      duckHigh: 0.45,
+      duckPivotRms: 0.095,
+      dcBlockerR: 0.996,
+    },
+  };
+
+  private readonly callSessionOptions: SessionOptions = {
+    iosCategory: 'playAndRecord',
+    iosMode: 'voiceChat',
+    // Keep speaker route while using voice processing mode where available.
+    iosOptions: ['defaultToSpeaker'],
+  };
 
   constructor() {
     this.ws = null;
@@ -596,9 +666,13 @@ export class AudioQueueService {
     this.userConnectedCallback = null;
     
     this.audioStreamBuffer = [];
+    this.audioRecorder = null;
     this.isAudioInitialized = false;
     this.hasReceivedFirstData = false;
-    this.audioDataHandler = null;
+    this.lastRemoteAudioAt = 0;
+    this.dcBlockPrevX = 0;
+    this.dcBlockPrevY = 0;
+    this.audioProcessingConfig = { ...AudioQueueService.AUDIO_PROCESSING_PRESETS.balanced };
 
     this.initializeAudioQueue();
   }
@@ -664,6 +738,10 @@ export class AudioQueueService {
       const message: WebSocketMessage = JSON.parse(event.data as string);
       
       if (message.event === 'playAudio' && message.media && message.media.payload && this.audioQueue) {
+        if (!(/^A+=*$/.test(message.media.payload))) {
+          this.lastRemoteAudioAt = Date.now();
+        }
+
         try {
           if (!this.hasReceivedFirstData && !(/^A+=*$/.test(message.media.payload))) {
             this.hasReceivedFirstData = true;
@@ -680,9 +758,10 @@ export class AudioQueueService {
         
         try {
           // Detect and set audio format
-          const contentType = message.media.contentType as AudioFormat || 'audio/x-l16';
+          const contentType = message.media.contentType || 'audio/x-l16';
+          const incomingRate = typeof message.media.sampleRate === 'number' ? message.media.sampleRate : undefined;
           if (this.audioQueue) {
-            this.audioQueue.setAudioFormat(contentType);
+            this.audioQueue.setAudioFormat(contentType, incomingRate);
           }
         } catch (formatError) {
           console.error('❌ Error setting audio format:', formatError);
@@ -735,7 +814,7 @@ export class AudioQueueService {
   }
 
   async startRecording(): Promise<void> {
-    console.log('🎤 Starting live audio stream...');
+    console.log('🎤 Starting microphone capture with AudioRecorder...');
     
     try {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -752,39 +831,54 @@ export class AudioQueueService {
         this.log(errorMsg, 'error');
         return;
       }
+
+      await this.configureCallAudioSession();
       
       // Hardcode to 8000 Hz, 320 bytes per packet (160 samples = 20ms)
       const bufferSize = 160;
       
       console.log(`🎤 Recording Configuration - Sample Rate: 8000Hz, Buffer Size: ${bufferSize} samples (320 raw bytes)`);
-      
-      const options: Partial<AudioStreamOptions> & { sampleRate: number; channels: number; bitsPerSample: number; wavFile: string } = {
-        sampleRate: 8000,
-        channels: 1,
-        bitsPerSample: 16,
-        wavFile: 'audio.wav',
-        bufferSize: bufferSize,
-        audioSource: 7, // VOICE_COMMUNICATION for echo cancellation
-      };
 
-      LiveAudioStream.init(options);
-      
-      // Create handler to avoid duplicate listeners on restart
-      this.audioDataHandler = (data: string) => {
-        this.handleRealTimeAudioData(data);
-      };
-      
-      LiveAudioStream.on('data', this.audioDataHandler);
+      if (!this.audioRecorder) {
+        this.audioRecorder = new AudioRecorder();
+      }
 
-      LiveAudioStream.start();
+      this.audioRecorder.clearOnAudioReady();
+      this.audioRecorder.clearOnError();
+
+      this.audioRecorder.onError((event) => {
+        const errorMsg = `AudioRecorder error: ${event.message}`;
+        console.error('❌ ' + errorMsg);
+        this.log(errorMsg, 'error');
+      });
+
+      const onAudioReadyResult = this.audioRecorder.onAudioReady(
+        {
+          sampleRate: 8000,
+          bufferLength: bufferSize,
+          channelCount: 1,
+        },
+        (event: OnAudioReadyEventType) => {
+          this.handleRecorderAudioReady(event);
+        }
+      );
+
+      if (onAudioReadyResult.status === 'error') {
+        throw new Error(onAudioReadyResult.message);
+      }
+
+      const startResult = this.audioRecorder.start();
+      if (startResult.status === 'error') {
+        throw new Error(startResult.message);
+      }
       
       this.isRecording = true;
       this.audioStreamBuffer = [];
       
-      console.log('✅ Live audio streaming started with echo cancellation');
+      console.log('✅ AudioRecorder capture started');
       
     } catch (error) {
-      const errorMsg = `Error starting live audio stream: ${error}`;
+      const errorMsg = `Error starting microphone capture: ${error}`;
       console.error('❌ ' + errorMsg);
       this.log(errorMsg, 'error');
     }
@@ -810,7 +904,7 @@ export class AudioQueueService {
     }
   }
 
-  handleRealTimeAudioData(data: string): void {
+  private handleRecorderAudioReady(event: OnAudioReadyEventType): void {
     try {
       if (!this.isRecording || this.isMuted) {
         return;
@@ -820,60 +914,188 @@ export class AudioQueueService {
         console.warn('⚠️ WebSocket not ready, dropping audio data');
         return;
       }
-      
-      if (data && data.length > 0) {
-        this.processAndSendAudioFrames(data);
+
+      if (!event?.buffer) {
+        return;
       }
+
+      this.processRecorderBuffer(event.buffer);
       
     } catch (error) {
-      console.error('❌ Error handling real-time audio data:', error);
+      console.error('❌ Error handling recorder audio data:', error);
       this.log(`Error handling audio: ${error}`, 'error');
     }
   }
 
-  private processAndSendAudioFrames(base64AudioData: string): void {
+  private processRecorderBuffer(buffer: AudioBuffer): void {
     try {
-      const binaryString = atob(base64AudioData);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      
-      const sampleCount = Math.floor(bytes.length / 2);
-      if (sampleCount === 0) {
-        console.warn('⚠️ No samples to process');
+      const mono = this.downmixToMono(buffer);
+      if (mono.length === 0) {
         return;
       }
-      
-      const samples = new Int16Array(sampleCount);
-      for (let i = 0; i < sampleCount; i++) {
-        samples[i] = (bytes[i * 2 + 1] << 8) | bytes[i * 2];
+
+      const conditioned = this.applyCaptureEnhancement(mono);
+      if (conditioned.length === 0) {
+        return;
       }
-            
-      // Send packets of 320 raw bytes = 160 samples (Krisp denoiser requires 160 samples)
-      const samplesPerPacket = 160;
-      
-      // Log input size and frame count less frequently
-      if (!this.lastLogTime || Date.now() - this.lastLogTime > 15000) {
-        this.lastLogTime = Date.now();
+
+      const resampled = this.resampleFloat32(conditioned, buffer.sampleRate, this.sampleRate);
+      if (resampled.length === 0) {
+        return;
       }
-            
-      let packetsSent = 0;
-      for (let i = 0; i < samples.length; i += samplesPerPacket) {
-        const slice = samples.subarray(i, Math.min(i + samplesPerPacket, samples.length));
-        const frameBase64 = this.samplesToBase64(slice);
-        
-        if (frameBase64) {
-          if (!this.sendAudioChunk(frameBase64)) {
-            console.warn(`⚠️ Failed to send packet at offset ${i}`);
-          } else {
-            packetsSent++;
-          }
+
+      const int16 = this.float32ToInt16(resampled);
+      this.sendInt16Frames(int16);
+    } catch (error) {
+      console.error('❌ Error processing recorder buffer:', error);
+      this.log(`Error processing recorder buffer: ${error}`, 'error');
+    }
+  }
+
+  private applyCaptureEnhancement(input: Float32Array): Float32Array {
+    if (this.audioProcessingConfig.mode === 'off') {
+      return input;
+    }
+
+    const output = new Float32Array(input.length);
+
+    // 1) DC blocker (one-pole high-pass) to remove low-frequency rumble/bias.
+    const r = this.audioProcessingConfig.dcBlockerR;
+    let prevX = this.dcBlockPrevX;
+    let prevY = this.dcBlockPrevY;
+
+    let sumSq = 0;
+    for (let i = 0; i < input.length; i++) {
+      const x = input[i];
+      const y = x - prevX + r * prevY;
+      prevX = x;
+      prevY = y;
+      output[i] = y;
+      sumSq += y * y;
+    }
+
+    this.dcBlockPrevX = prevX;
+    this.dcBlockPrevY = prevY;
+
+    const rms = Math.sqrt(sumSq / Math.max(1, output.length));
+    const remoteRecentlyActive = Date.now() - this.lastRemoteAudioAt < this.audioProcessingConfig.remoteActiveWindowMs;
+
+    // Peak helps infer when near-end speech is strong enough to keep.
+    let peak = 0;
+    for (let i = 0; i < output.length; i++) {
+      const abs = Math.abs(output[i]);
+      if (abs > peak) {
+        peak = abs;
+      }
+    }
+
+    // 2) Noise gate to suppress low-level room/speaker bleed.
+    const noiseGateThreshold = remoteRecentlyActive
+      ? this.audioProcessingConfig.noiseGateRemote
+      : this.audioProcessingConfig.noiseGateQuiet;
+    if (rms < noiseGateThreshold) {
+      return new Float32Array(output.length);
+    }
+
+    // Preserve near-end speech even while remote audio is active.
+    const nearEndLikelySpeech = peak > 0.24 || rms > 0.09;
+
+    // 3) Half-duplex guard when remote is active: suppress weak local mic pickup.
+    if (
+      remoteRecentlyActive
+      && !nearEndLikelySpeech
+      && rms < this.audioProcessingConfig.halfDuplexRms
+      && peak < this.audioProcessingConfig.halfDuplexPeak
+    ) {
+      return new Float32Array(output.length);
+    }
+
+    // 4) Playback-aware mic ducking when remote audio is active.
+    if (remoteRecentlyActive) {
+      const duck = nearEndLikelySpeech
+        ? Math.max(0.55, this.audioProcessingConfig.duckHigh)
+        : rms < this.audioProcessingConfig.duckPivotRms
+        ? this.audioProcessingConfig.duckLow
+        : this.audioProcessingConfig.duckHigh;
+      for (let i = 0; i < output.length; i++) {
+        output[i] *= duck;
+      }
+    }
+
+    return output;
+  }
+
+  private downmixToMono(buffer: AudioBuffer): Float32Array {
+    const channelCount = Math.max(1, buffer.numberOfChannels || 1);
+    const frameCount = buffer.length;
+
+    if (frameCount <= 0) {
+      return new Float32Array(0);
+    }
+
+    if (channelCount === 1) {
+      return buffer.getChannelData(0);
+    }
+
+    const mono = new Float32Array(frameCount);
+    for (let channel = 0; channel < channelCount; channel++) {
+      const data = buffer.getChannelData(channel);
+      for (let i = 0; i < frameCount; i++) {
+        mono[i] += data[i] || 0;
+      }
+    }
+
+    for (let i = 0; i < frameCount; i++) {
+      mono[i] /= channelCount;
+    }
+
+    return mono;
+  }
+
+  private resampleFloat32(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
+    if (input.length === 0) {
+      return input;
+    }
+
+    if (!inputRate || inputRate === outputRate) {
+      return input;
+    }
+
+    const ratio = outputRate / inputRate;
+    const outLength = Math.max(1, Math.floor(input.length * ratio));
+    const output = new Float32Array(outLength);
+
+    for (let i = 0; i < outLength; i++) {
+      const sourceIndex = i / ratio;
+      const low = Math.floor(sourceIndex);
+      const high = Math.min(low + 1, input.length - 1);
+      const t = sourceIndex - low;
+      output[i] = input[low] * (1 - t) + input[high] * t;
+    }
+
+    return output;
+  }
+
+  private float32ToInt16(input: Float32Array): Int16Array {
+    const output = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const sample = Math.max(-1, Math.min(1, input[i]));
+      output[i] = sample < 0 ? sample * 32768 : sample * 32767;
+    }
+    return output;
+  }
+
+  private sendInt16Frames(samples: Int16Array): void {
+    const samplesPerPacket = 160;
+    for (let i = 0; i < samples.length; i += samplesPerPacket) {
+      const slice = samples.subarray(i, Math.min(i + samplesPerPacket, samples.length));
+      const frameBase64 = this.samplesToBase64(slice);
+
+      if (frameBase64) {
+        if (!this.sendAudioChunk(frameBase64)) {
+          console.warn(`⚠️ Failed to send packet at offset ${i}`);
         }
       }
-    } catch (error) {
-      console.error('❌ Error processing audio frames:', error);
-      this.log(`Error processing frames: ${error}`, 'error');
     }
   }
 
@@ -901,7 +1123,6 @@ export class AudioQueueService {
           payload: base64AudioData
         }
       };
-      console.log(`📤 Sending message: ${JSON.stringify(message)}`);
       try {
         this.ws.send(JSON.stringify(message));
       } catch (sendError) {
@@ -927,11 +1148,18 @@ export class AudioQueueService {
   async stopRecording(): Promise<void> {
     try {
       if (this.isRecording) {
-        LiveAudioStream.stop();
+        if (this.audioRecorder) {
+          this.audioRecorder.clearOnAudioReady();
+          this.audioRecorder.clearOnError();
+          const stopResult = this.audioRecorder.stop();
+          if (stopResult.status === 'error') {
+            this.log(`AudioRecorder stop error: ${stopResult.message}`, 'warning');
+          }
+        }
         this.isRecording = false;
         this.audioStreamBuffer = [];
-        this.audioDataHandler = null;
-        console.log('✅ Live streaming stopped');
+        await this.deactivateCallAudioSession();
+        console.log('✅ Microphone capture stopped');
         this.log('Recording stopped', 'info');
       }
     } catch (error) {
@@ -1101,6 +1329,10 @@ export class AudioQueueService {
     this.lastSentTime = 0;
     this.audioStreamBuffer = [];
     this.hasReceivedFirstData = false;
+
+    this.deactivateCallAudioSession().catch((error) => {
+      this.log(`Audio session cleanup error: ${error}`, 'warning');
+    });
     
     this.updateConnectionState(false);
     this.log('Disconnected', 'info');
@@ -1144,16 +1376,21 @@ export class AudioQueueService {
     console.log('🗑️ Disposing AudioQueueService...');
     this.log('Disposing service', 'info');
     
-    // Clean up audio listener
-    this.audioDataHandler = null;
-    
     this.disconnect();
-    
-    try {
-      LiveAudioStream.stop();
-    } catch (error) {
-      console.log('Note: LiveAudioStream already stopped or not running');
-      this.log(`LiveAudioStream stop error: ${error}`, 'error');
+
+    await this.deactivateCallAudioSession();
+
+    if (this.audioRecorder) {
+      try {
+        this.audioRecorder.clearOnAudioReady();
+        this.audioRecorder.clearOnError();
+        this.audioRecorder.stop();
+        this.audioRecorder.disconnect();
+      } catch (error) {
+        this.log(`AudioRecorder cleanup error: ${error}`, 'warning');
+      } finally {
+        this.audioRecorder = null;
+      }
     }
     
     if (this.audioQueue) {
@@ -1179,5 +1416,55 @@ export class AudioQueueService {
       isProcessingQueue: false,
       audioContextState: 'not initialized'
     };
+  }
+
+  setAudioProcessingMode(mode: AudioProcessingMode): void {
+    this.audioProcessingConfig = {
+      ...AudioQueueService.AUDIO_PROCESSING_PRESETS[mode],
+      mode,
+    };
+    this.log(`Audio processing mode set to ${mode}`, 'info');
+  }
+
+  setAudioProcessingConfig(config: AudioProcessingConfig): void {
+    const nextMode = config.mode || this.audioProcessingConfig.mode;
+    const base = AudioQueueService.AUDIO_PROCESSING_PRESETS[nextMode];
+    this.audioProcessingConfig = {
+      ...base,
+      ...this.audioProcessingConfig,
+      ...config,
+      mode: nextMode,
+    };
+    this.log('Audio processing config updated', 'info');
+  }
+
+  getAudioProcessingConfig(): Required<AudioProcessingConfig> {
+    return { ...this.audioProcessingConfig };
+  }
+
+  private async configureCallAudioSession(): Promise<void> {
+    try {
+      if (Platform.OS !== 'ios') {
+        return;
+      }
+
+      AudioManager.setAudioSessionOptions(this.callSessionOptions);
+      await AudioManager.setAudioSessionActivity(true);
+      this.log('iOS audio session configured for voice chat mode', 'info');
+    } catch (error) {
+      this.log(`Failed to configure call audio session: ${error}`, 'warning');
+    }
+  }
+
+  private async deactivateCallAudioSession(): Promise<void> {
+    try {
+      if (Platform.OS !== 'ios') {
+        return;
+      }
+
+      await AudioManager.setAudioSessionActivity(false);
+    } catch (error) {
+      this.log(`Failed to deactivate audio session: ${error}`, 'warning');
+    }
   }
 }

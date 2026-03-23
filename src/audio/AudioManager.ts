@@ -4,7 +4,15 @@
  * Built-in audio service for React Native applications
  */
 
-import { AudioStats, SendingStats, AudioConnectionOptions, SDKError, ErrorCode } from '../types';
+import {
+  AudioStats,
+  SendingStats,
+  AudioConnectionOptions,
+  SDKError,
+  ErrorCode,
+  AudioProcessingConfig,
+  AudioProcessingMode,
+} from '../types';
 import { Logger } from '../utils/logger';
 import { AudioQueueService } from './AudioQueueService';
 
@@ -149,6 +157,27 @@ export class AudioManager {
    */
   setVolume(volume: number): void {
     this.audioService.setVolume(volume);
+  }
+
+  /**
+   * Set processing mode for capture enhancement.
+   */
+  setAudioProcessingMode(mode: AudioProcessingMode): void {
+    this.audioService.setAudioProcessingMode(mode);
+  }
+
+  /**
+   * Override audio processing knobs.
+   */
+  setAudioProcessingConfig(config: AudioProcessingConfig): void {
+    this.audioService.setAudioProcessingConfig(config);
+  }
+
+  /**
+   * Get current processing configuration.
+   */
+  getAudioProcessingConfig(): Required<AudioProcessingConfig> {
+    return this.audioService.getAudioProcessingConfig();
   }
 
   /**

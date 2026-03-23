@@ -31,7 +31,6 @@
     "react": ">=16.8.0",
     "react-native": ">=0.60.0",
     "react-native-audio-api": ">=0.3.0",
-    "react-native-live-audio-stream": ">=1.0.0",
     "base-64": ">=1.0.0"
   },
   "peerDependenciesMeta": {
@@ -42,9 +41,6 @@
       "optional": true
     },
     "react-native-audio-api": {
-      "optional": false
-    },
-    "react-native-live-audio-stream": {
       "optional": false
     },
     "base-64": {

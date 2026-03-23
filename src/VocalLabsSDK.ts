@@ -34,6 +34,8 @@ import {
   ErrorCode,
   AudioStats,
   SendingStats,
+  AudioProcessingConfig,
+  AudioProcessingMode,
 } from './types';
 import { DEFAULT_CONFIG } from './config/constants';
 import { Logger } from './utils/logger';
@@ -47,7 +49,7 @@ export class VocalLabsSDK {
   private logger: Logger;
 
   // Configuration
-  private config: Required<SDKConfig>;
+  private config: SDKConfig & { sampleRate: number; enableLogs: boolean };
 
   // State
   private state: SDKState = {
@@ -74,6 +76,7 @@ export class VocalLabsSDK {
     this.config = {
       sampleRate: config?.sampleRate || DEFAULT_CONFIG.SAMPLE_RATE,
       enableLogs: config?.enableLogs !== false,
+      audioProcessing: config?.audioProcessing,
     };
 
     // Initialize logger
@@ -88,6 +91,10 @@ export class VocalLabsSDK {
     this.audioManager = new AudioManager(
       this.logger
     );
+
+    if (this.config.audioProcessing) {
+      this.audioManager.setAudioProcessingConfig(this.config.audioProcessing);
+    }
 
     this.setupAudioCallbacks();
 
@@ -234,6 +241,27 @@ export class VocalLabsSDK {
    */
   setVolume(volume: number): void {
     this.audioManager.setVolume(volume);
+  }
+
+  /**
+   * Set built-in capture processing mode.
+   */
+  setAudioProcessingMode(mode: AudioProcessingMode): void {
+    this.audioManager.setAudioProcessingMode(mode);
+  }
+
+  /**
+   * Set detailed capture processing controls.
+   */
+  setAudioProcessingConfig(config: AudioProcessingConfig): void {
+    this.audioManager.setAudioProcessingConfig(config);
+  }
+
+  /**
+   * Get current capture processing controls.
+   */
+  getAudioProcessingConfig(): Required<AudioProcessingConfig> {
+    return this.audioManager.getAudioProcessingConfig();
   }
 
   /**

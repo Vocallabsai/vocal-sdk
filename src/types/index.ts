@@ -8,6 +8,22 @@
 export interface SDKConfig {
   sampleRate?: number;
   enableLogs?: boolean;
+  audioProcessing?: AudioProcessingConfig;
+}
+
+export type AudioProcessingMode = 'off' | 'balanced' | 'aggressive';
+
+export interface AudioProcessingConfig {
+  mode?: AudioProcessingMode;
+  remoteActiveWindowMs?: number;
+  noiseGateQuiet?: number;
+  noiseGateRemote?: number;
+  halfDuplexRms?: number;
+  halfDuplexPeak?: number;
+  duckLow?: number;
+  duckHigh?: number;
+  duckPivotRms?: number;
+  dcBlockerR?: number;
 }
 
 // ============= Call Management =============
