@@ -426,63 +426,60 @@ class ReactNativeAudioQueue {
 
   base64ToPCMData(base64Audio: string): Float32Array | null {
     try {
-      const binaryString = atob(base64Audio);
-      
-      if (this.audioFormat === 'audio/x-mulaw') {
-        // μ-law decoding (ITU-T G.711)
-        const floatArray = new Float32Array(binaryString.length);
-        const ULAW_BIAS = 33;
-        
-        for (let i = 0; i < binaryString.length; i++) {
-          let ulawByte = binaryString.charCodeAt(i);
-          // Invert all bits
-          ulawByte = ~ulawByte & 0xff;
-          
-          // Extract sign bit (MSB)
-          const sign = ulawByte & 0x80;
-          // Extract exponent (3 bits)
-          const exponent = (ulawByte >> 4) & 0x07;
-          // Extract mantissa (4 bits)
-          const mantissa = ulawByte & 0x0f;
-          
-          // Reconstruct the linear value
-          let sample = mantissa << (exponent + 3);
-          sample += ULAW_BIAS << exponent;
-          
-          // Apply sign
-          sample = sign !== 0 ? -sample : sample;
-          
-          floatArray[i] = sample / 32768.0;
-        }
-        
-        return floatArray;
-      } else {
-        // L16 (Linear PCM) decoding
-        const byteLength = binaryString.length;
-        
-        if (byteLength % 2 === 0) {
-          const samples = byteLength / 2;
-          const floatArray = new Float32Array(samples);
-          
-          for (let i = 0; i < samples; i++) {
-            const byteIndex = i * 2;
-            // x-l16 is network byte order (big-endian): high byte first, then low byte.
-            const sample = (binaryString.charCodeAt(byteIndex) << 8) | binaryString.charCodeAt(byteIndex + 1);
-            const signedSample = sample > 32767 ? sample - 65536 : sample;
-            floatArray[i] = signedSample / 32768.0;
-          }
-          
-          return floatArray;
-        } else {
-          const floatArray = new Float32Array(byteLength);
-          for (let i = 0; i < byteLength; i++) {
-            floatArray[i] = (binaryString.charCodeAt(i) - 128) / 128.0;
-          }
-          
-          return floatArray;
-        }
+      const binary = atob(base64Audio);
+      const bytes = new Uint8Array(binary.length);
+
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
       }
-      
+
+      // ---------- μ-LAW (FIXED) ----------
+      if (this.audioFormat === 'audio/x-mulaw') {
+        const floatArray = new Float32Array(bytes.length);
+
+        for (let i = 0; i < bytes.length; i++) {
+          let mu = ~bytes[i] & 0xff;
+
+          const sign = (mu & 0x80) ? -1 : 1;
+          const exponent = (mu >> 4) & 0x07;
+          const mantissa = mu & 0x0F;
+
+          // ✅ Correct G.711 decode
+          let sample = ((mantissa << 4) + 0x08) << exponent;
+          sample = sign * sample;
+
+          floatArray[i] = sample / 32768;
+        }
+
+        return floatArray;
+      }
+
+      // ---------- L16 (KEEP YOURS) ----------
+      const byteLength = bytes.length;
+
+      if (byteLength % 2 === 0) {
+        const samples = byteLength / 2;
+        const floatArray = new Float32Array(samples);
+
+        for (let i = 0; i < samples; i++) {
+          const idx = i * 2;
+
+          const sample = (bytes[idx] << 8) | bytes[idx + 1];
+          const signedSample = sample > 32767 ? sample - 65536 : sample;
+
+          floatArray[i] = signedSample / 32768;
+        }
+
+        return floatArray;
+      }
+
+      const floatArray = new Float32Array(byteLength);
+      for (let i = 0; i < byteLength; i++) {
+        floatArray[i] = (bytes[i] - 128) / 128;
+      }
+
+      return floatArray;
+
     } catch (error) {
       console.error('❌ Error converting base64 to PCM:', error);
       return null;
