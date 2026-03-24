@@ -2,6 +2,61 @@
 
 React Native SDK for real-time VocalLabs voice calls over WebSocket.
 
+## Setup
+
+### 1) Install
+
+```bash
+npm install vocallabsai-sdk
+```
+
+### 2) Install peer dependencies (if your app does not already have them)
+
+Peer dependencies used by this SDK:
+
+- react
+- react-native
+- react-native-audio-api
+- base-64
+
+### 3) Android permissions
+
+Add these permissions in your app `AndroidManifest.xml`:
+
+```xml
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+```
+
+Also request microphone permission at runtime.
+
+### 4) Linking
+
+For React Native 0.60+, autolinking should work automatically.
+
+If not linked, add manual linking:
+
+`android/settings.gradle`
+
+```gradle
+include ':vocallabs-audio-effects'
+project(':vocallabs-audio-effects').projectDir = new File(rootProject.projectDir, '../node_modules/vocallabsai-sdk/android')
+```
+
+`android/app/build.gradle`
+
+```gradle
+dependencies {
+  implementation project(':vocallabs-audio-effects')
+}
+```
+
+### 5) Rebuild app
+
+```bash
+cd android && ./gradlew clean
+```
+
 ## Features
 
 - Direct WebSocket call connection
@@ -10,23 +65,7 @@ React Native SDK for real-time VocalLabs voice calls over WebSocket.
 - Event-driven API for connection and call state
 - Live stats for sent/received audio
 - TypeScript support out of the box
-- Android native call-audio effects support:
-  - Acoustic Echo Canceler (AEC)
-  - Noise Suppressor (NS)
-  - Automatic Gain Control (AGC)
-
-## Installation
-
-```bash
-npm install vocallabsai-sdk
-```
-
-Peer dependencies used by this SDK:
-
-- react
-- react-native
-- react-native-audio-api
-- base-64
+- Android native call-audio effects support (AEC, NS, AGC)
 
 ## Quick Start
 
@@ -173,9 +212,7 @@ sdk.on('onStatsUpdate', ({ audio, sending }) => {
 
 - Grant RECORD_AUDIO permission at runtime.
 - Keep MODIFY_AUDIO_SETTINGS permission in AndroidManifest.
-- React Native autolinking should link native module automatically.
-
-If autolinking fails, add manual Android linking in your app's gradle files to include this package's android folder.
+- Prefer autolinking first; use manual linking only if needed.
 
 ## Minimal React Native Example
 
