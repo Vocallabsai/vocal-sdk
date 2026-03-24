@@ -15,6 +15,7 @@ import {
 } from '../types';
 import { Logger } from '../utils/logger';
 import { AudioQueueService } from './AudioQueueService';
+import type { AudioEffectsStatus } from '../utils/VocalLabsAudioEffects';
 
 export class AudioManager {
   private audioService: AudioQueueService;
@@ -178,6 +179,43 @@ export class AudioManager {
    */
   getAudioProcessingConfig(): Required<AudioProcessingConfig> {
     return this.audioService.getAudioProcessingConfig();
+  }
+
+  // Native Audio Effects (Android only)
+
+  /**
+   * Enable or disable Acoustic Echo Cancellation
+   */
+  async setAcousticEchoCanceler(enabled: boolean): Promise<boolean> {
+    return this.audioService.setAcousticEchoCanceler(enabled);
+  }
+
+  /**
+   * Enable or disable Noise Suppression
+   */
+  async setNoiseSuppressor(enabled: boolean): Promise<boolean> {
+    return this.audioService.setNoiseSuppressor(enabled);
+  }
+
+  /**
+   * Enable or disable Automatic Gain Control
+   */
+  async setAutomaticGainControl(enabled: boolean): Promise<boolean> {
+    return this.audioService.setAutomaticGainControl(enabled);
+  }
+
+  /**
+   * Get status of native audio effects
+   */
+  async getNativeAudioEffectsStatus(): Promise<AudioEffectsStatus | null> {
+    return this.audioService.getNativeAudioEffectsStatus();
+  }
+
+  /**
+   * Check if native audio effects are available
+   */
+  isNativeAudioEffectsAvailable(): boolean {
+    return this.audioService.isNativeAudioEffectsAvailable();
   }
 
   /**

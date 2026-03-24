@@ -41,6 +41,7 @@ import { DEFAULT_CONFIG } from './config/constants';
 import { Logger } from './utils/logger';
 import { CallManager } from './call/CallManager';
 import { AudioManager } from './audio/AudioManager';
+import type { AudioEffectsStatus } from './utils/VocalLabsAudioEffects';
 
 export class VocalLabsSDK {
   // Core managers
@@ -262,6 +263,43 @@ export class VocalLabsSDK {
    */
   getAudioProcessingConfig(): Required<AudioProcessingConfig> {
     return this.audioManager.getAudioProcessingConfig();
+  }
+
+  // Native Audio Effects (Android only)
+
+  /**
+   * Enable or disable Acoustic Echo Cancellation (Android only)
+   */
+  async setAcousticEchoCanceler(enabled: boolean): Promise<boolean> {
+    return this.audioManager.setAcousticEchoCanceler(enabled);
+  }
+
+  /**
+   * Enable or disable Noise Suppression (Android only)
+   */
+  async setNoiseSuppressor(enabled: boolean): Promise<boolean> {
+    return this.audioManager.setNoiseSuppressor(enabled);
+  }
+
+  /**
+   * Enable or disable Automatic Gain Control (Android only)
+   */
+  async setAutomaticGainControl(enabled: boolean): Promise<boolean> {
+    return this.audioManager.setAutomaticGainControl(enabled);
+  }
+
+  /**
+   * Get status of native audio effects (Android only)
+   */
+  async getNativeAudioEffectsStatus(): Promise<AudioEffectsStatus | null> {
+    return this.audioManager.getNativeAudioEffectsStatus();
+  }
+
+  /**
+   * Check if native audio effects are available (Android only)
+   */
+  isNativeAudioEffectsAvailable(): boolean {
+    return this.audioManager.isNativeAudioEffectsAvailable();
   }
 
   /**

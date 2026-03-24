@@ -10,7 +10,7 @@ export class Logger {
   private prefix: string;
   private logCallback?: (message: string, level: LogLevel) => void;
 
-  constructor(enableLogs: boolean = true, prefix: string = '[SubspaceCallSDK]') {
+  constructor(enableLogs: boolean = true, prefix: string = '[Vocallabs SDK]') {
     this.enableLogs = enableLogs;
     this.prefix = prefix;
   }

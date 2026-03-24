@@ -8,6 +8,7 @@ import { AudioContext, AudioBuffer, AudioBufferSourceNode, GainNode, AudioRecord
 import { Platform, PermissionsAndroid } from 'react-native';
 import { decode as atob, encode as btoa } from 'base-64';
 import { AudioProcessingConfig, AudioProcessingMode } from '../types';
+import VocalLabsAudioEffects, { type AudioEffectsStatus, type NativeAudioChunkEvent } from '../utils/VocalLabsAudioEffects';
 
 interface AudioStats {
   receivedChunks: number;
@@ -593,12 +594,13 @@ export class AudioQueueService {
   // Audio stream
   private audioStreamBuffer: any[];
   private audioRecorder: AudioRecorder | null;
+  private nativeChunkUnsubscribe: (() => void) | null;
   private isAudioInitialized: boolean;
   private hasReceivedFirstData: boolean;
-  private lastRemoteAudioAt: number;
-  private dcBlockPrevX: number;
-  private dcBlockPrevY: number;
   private audioProcessingConfig: Required<AudioProcessingConfig>;
+
+  // Native audio effects (Android only)
+  private nativeAudioEffectsInitialized: boolean;
 
   private static readonly AUDIO_PROCESSING_PRESETS: Record<AudioProcessingMode, Required<AudioProcessingConfig>> = {
     off: {
@@ -667,12 +669,11 @@ export class AudioQueueService {
     
     this.audioStreamBuffer = [];
     this.audioRecorder = null;
+    this.nativeChunkUnsubscribe = null;
     this.isAudioInitialized = false;
     this.hasReceivedFirstData = false;
-    this.lastRemoteAudioAt = 0;
-    this.dcBlockPrevX = 0;
-    this.dcBlockPrevY = 0;
     this.audioProcessingConfig = { ...AudioQueueService.AUDIO_PROCESSING_PRESETS.balanced };
+    this.nativeAudioEffectsInitialized = false;
 
     this.initializeAudioQueue();
   }
@@ -738,10 +739,6 @@ export class AudioQueueService {
       const message: WebSocketMessage = JSON.parse(event.data as string);
       
       if (message.event === 'playAudio' && message.media && message.media.payload && this.audioQueue) {
-        if (!(/^A+=*$/.test(message.media.payload))) {
-          this.lastRemoteAudioAt = Date.now();
-        }
-
         try {
           if (!this.hasReceivedFirstData && !(/^A+=*$/.test(message.media.payload))) {
             this.hasReceivedFirstData = true;
@@ -836,6 +833,28 @@ export class AudioQueueService {
       
       // Hardcode to 8000 Hz, 320 bytes per packet (160 samples = 20ms)
       const bufferSize = 160;
+
+      if (Platform.OS === 'android' && VocalLabsAudioEffects.isAvailable()) {
+        const started = await VocalLabsAudioEffects.startNativeRecording({
+          sampleRate: 8000,
+          bufferLength: bufferSize,
+          channelCount: 1,
+        });
+
+        if (started) {
+          this.nativeChunkUnsubscribe = VocalLabsAudioEffects.subscribeNativeChunks(
+            (event: NativeAudioChunkEvent) => {
+              this.handleNativeRecorderChunk(event);
+            }
+          );
+
+          this.isRecording = true;
+          this.audioStreamBuffer = [];
+          this.nativeAudioEffectsInitialized = VocalLabsAudioEffects.isActive();
+          console.log('✅ Native Android recording started with built-in audio effects');
+          return;
+        }
+      }
       
       console.log(`🎤 Recording Configuration - Sample Rate: 8000Hz, Buffer Size: ${bufferSize} samples (320 raw bytes)`);
 
@@ -874,6 +893,35 @@ export class AudioQueueService {
       
       this.isRecording = true;
       this.audioStreamBuffer = [];
+      
+      // Initialize native audio effects (Android only)
+      if (Platform.OS === 'android' && VocalLabsAudioEffects.isAvailable()) {
+        try {
+          const recorderAny = this.audioRecorder as any;
+          const sessionIdRaw = typeof recorderAny?.getAudioSessionId === 'function'
+            ? recorderAny.getAudioSessionId()
+            : null;
+          const sessionId = typeof sessionIdRaw === 'number' ? sessionIdRaw : -1;
+
+          const success = await VocalLabsAudioEffects.initializeAudioEffects(sessionId);
+          if (success) {
+            this.nativeAudioEffectsInitialized = true;
+            const enabled = await VocalLabsAudioEffects.enableAllEffects();
+            if (enabled) {
+              console.log('✅ Native audio effects enabled');
+            } else {
+              this.nativeAudioEffectsInitialized = false;
+              console.warn('⚠️ Native audio effects not enabled for this audio session');
+            }
+          } else {
+            this.nativeAudioEffectsInitialized = false;
+            console.warn('⚠️ Native audio effects init skipped: recorder session id unavailable');
+          }
+        } catch (error) {
+          console.warn('⚠️ Failed to initialize native audio effects:', error);
+          this.nativeAudioEffectsInitialized = false;
+        }
+      }
       
       console.log('✅ AudioRecorder capture started');
       
@@ -934,12 +982,7 @@ export class AudioQueueService {
         return;
       }
 
-      const conditioned = this.applyCaptureEnhancement(mono);
-      if (conditioned.length === 0) {
-        return;
-      }
-
-      const resampled = this.resampleFloat32(conditioned, buffer.sampleRate, this.sampleRate);
+      const resampled = this.resampleFloat32(mono, buffer.sampleRate, this.sampleRate);
       if (resampled.length === 0) {
         return;
       }
@@ -952,76 +995,70 @@ export class AudioQueueService {
     }
   }
 
-  private applyCaptureEnhancement(input: Float32Array): Float32Array {
-    if (this.audioProcessingConfig.mode === 'off') {
+  private handleNativeRecorderChunk(event: NativeAudioChunkEvent): void {
+    try {
+      if (!this.isRecording || this.isMuted) {
+        return;
+      }
+
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      if (!event?.base64) {
+        return;
+      }
+
+      const binary = atob(event.base64);
+      const byteLength = binary.length;
+      if (byteLength < 2) {
+        return;
+      }
+
+      const sampleCount = Math.floor(byteLength / 2);
+      const pcmInt16 = new Int16Array(sampleCount);
+
+      for (let i = 0; i < sampleCount; i++) {
+        const low = binary.charCodeAt(i * 2) & 0xff;
+        const high = binary.charCodeAt(i * 2 + 1);
+        const value = (high << 8) | low;
+        pcmInt16[i] = value > 0x7fff ? value - 0x10000 : value;
+      }
+
+      const downmixed = this.downmixInt16ToMono(pcmInt16, event.channelCount || 1);
+      const float = this.int16ToFloat32(downmixed);
+      const resampled = this.resampleFloat32(float, event.sampleRate || 8000, this.sampleRate);
+      const int16 = this.float32ToInt16(resampled);
+      this.sendInt16Frames(int16);
+    } catch (error) {
+      this.log(`Error handling native recorder chunk: ${error}`, 'warning');
+    }
+  }
+
+  private downmixInt16ToMono(input: Int16Array, channelCount: number): Int16Array {
+    if (channelCount <= 1) {
       return input;
     }
 
+    const frameCount = Math.floor(input.length / channelCount);
+    const mono = new Int16Array(frameCount);
+
+    for (let frame = 0; frame < frameCount; frame++) {
+      let sum = 0;
+      for (let ch = 0; ch < channelCount; ch++) {
+        sum += input[frame * channelCount + ch] || 0;
+      }
+      mono[frame] = Math.max(-32768, Math.min(32767, Math.round(sum / channelCount)));
+    }
+
+    return mono;
+  }
+
+  private int16ToFloat32(input: Int16Array): Float32Array {
     const output = new Float32Array(input.length);
-
-    // 1) DC blocker (one-pole high-pass) to remove low-frequency rumble/bias.
-    const r = this.audioProcessingConfig.dcBlockerR;
-    let prevX = this.dcBlockPrevX;
-    let prevY = this.dcBlockPrevY;
-
-    let sumSq = 0;
     for (let i = 0; i < input.length; i++) {
-      const x = input[i];
-      const y = x - prevX + r * prevY;
-      prevX = x;
-      prevY = y;
-      output[i] = y;
-      sumSq += y * y;
+      output[i] = input[i] / 32768;
     }
-
-    this.dcBlockPrevX = prevX;
-    this.dcBlockPrevY = prevY;
-
-    const rms = Math.sqrt(sumSq / Math.max(1, output.length));
-    const remoteRecentlyActive = Date.now() - this.lastRemoteAudioAt < this.audioProcessingConfig.remoteActiveWindowMs;
-
-    // Peak helps infer when near-end speech is strong enough to keep.
-    let peak = 0;
-    for (let i = 0; i < output.length; i++) {
-      const abs = Math.abs(output[i]);
-      if (abs > peak) {
-        peak = abs;
-      }
-    }
-
-    // 2) Noise gate to suppress low-level room/speaker bleed.
-    const noiseGateThreshold = remoteRecentlyActive
-      ? this.audioProcessingConfig.noiseGateRemote
-      : this.audioProcessingConfig.noiseGateQuiet;
-    if (rms < noiseGateThreshold) {
-      return new Float32Array(output.length);
-    }
-
-    // Preserve near-end speech even while remote audio is active.
-    const nearEndLikelySpeech = peak > 0.24 || rms > 0.09;
-
-    // 3) Half-duplex guard when remote is active: suppress weak local mic pickup.
-    if (
-      remoteRecentlyActive
-      && !nearEndLikelySpeech
-      && rms < this.audioProcessingConfig.halfDuplexRms
-      && peak < this.audioProcessingConfig.halfDuplexPeak
-    ) {
-      return new Float32Array(output.length);
-    }
-
-    // 4) Playback-aware mic ducking when remote audio is active.
-    if (remoteRecentlyActive) {
-      const duck = nearEndLikelySpeech
-        ? Math.max(0.55, this.audioProcessingConfig.duckHigh)
-        : rms < this.audioProcessingConfig.duckPivotRms
-        ? this.audioProcessingConfig.duckLow
-        : this.audioProcessingConfig.duckHigh;
-      for (let i = 0; i < output.length; i++) {
-        output[i] *= duck;
-      }
-    }
-
     return output;
   }
 
@@ -1148,6 +1185,15 @@ export class AudioQueueService {
   async stopRecording(): Promise<void> {
     try {
       if (this.isRecording) {
+        if (this.nativeChunkUnsubscribe) {
+          this.nativeChunkUnsubscribe();
+          this.nativeChunkUnsubscribe = null;
+        }
+
+        if (Platform.OS === 'android' && VocalLabsAudioEffects.isAvailable()) {
+          await VocalLabsAudioEffects.stopNativeRecording();
+        }
+
         if (this.audioRecorder) {
           this.audioRecorder.clearOnAudioReady();
           this.audioRecorder.clearOnError();
@@ -1156,6 +1202,18 @@ export class AudioQueueService {
             this.log(`AudioRecorder stop error: ${stopResult.message}`, 'warning');
           }
         }
+        
+        // Release native audio effects
+        if (this.nativeAudioEffectsInitialized && VocalLabsAudioEffects.isAvailable()) {
+          try {
+            await VocalLabsAudioEffects.release();
+            this.nativeAudioEffectsInitialized = false;
+            console.log('✅ Native audio effects released');
+          } catch (error) {
+            console.warn('⚠️ Failed to release native audio effects:', error);
+          }
+        }
+        
         this.isRecording = false;
         this.audioStreamBuffer = [];
         await this.deactivateCallAudioSession();
@@ -1440,6 +1498,84 @@ export class AudioQueueService {
 
   getAudioProcessingConfig(): Required<AudioProcessingConfig> {
     return { ...this.audioProcessingConfig };
+  }
+
+  // Native Audio Effects Control (Android only)
+
+  /**
+   * Enable or disable Acoustic Echo Cancellation
+   */
+  async setAcousticEchoCanceler(enabled: boolean): Promise<boolean> {
+    if (!this.nativeAudioEffectsInitialized) {
+      console.warn('Native audio effects not initialized');
+      return false;
+    }
+    try {
+      const result = await VocalLabsAudioEffects.setAcousticEchoCanceler(enabled);
+      this.log(`Acoustic Echo Canceller ${enabled ? 'enabled' : 'disabled'}`, 'info');
+      return result;
+    } catch (error) {
+      this.log(`Failed to set AEC: ${error}`, 'warning');
+      return false;
+    }
+  }
+
+  /**
+   * Enable or disable Noise Suppression
+   */
+  async setNoiseSuppressor(enabled: boolean): Promise<boolean> {
+    if (!this.nativeAudioEffectsInitialized) {
+      console.warn('Native audio effects not initialized');
+      return false;
+    }
+    try {
+      const result = await VocalLabsAudioEffects.setNoiseSuppressor(enabled);
+      this.log(`Noise Suppressor ${enabled ? 'enabled' : 'disabled'}`, 'info');
+      return result;
+    } catch (error) {
+      this.log(`Failed to set NS: ${error}`, 'warning');
+      return false;
+    }
+  }
+
+  /**
+   * Enable or disable Automatic Gain Control
+   */
+  async setAutomaticGainControl(enabled: boolean): Promise<boolean> {
+    if (!this.nativeAudioEffectsInitialized) {
+      console.warn('Native audio effects not initialized');
+      return false;
+    }
+    try {
+      const result = await VocalLabsAudioEffects.setAutomaticGainControl(enabled);
+      this.log(`Automatic Gain Control ${enabled ? 'enabled' : 'disabled'}`, 'info');
+      return result;
+    } catch (error) {
+      this.log(`Failed to set AGC: ${error}`, 'warning');
+      return false;
+    }
+  }
+
+  /**
+   * Get status of all native audio effects
+   */
+  async getNativeAudioEffectsStatus(): Promise<AudioEffectsStatus | null> {
+    if (!this.nativeAudioEffectsInitialized) {
+      return null;
+    }
+    try {
+      return await VocalLabsAudioEffects.getStatus();
+    } catch (error) {
+      this.log(`Failed to get audio effects status: ${error}`, 'warning');
+      return null;
+    }
+  }
+
+  /**
+   * Check if native audio effects are available and initialized
+   */
+  isNativeAudioEffectsAvailable(): boolean {
+    return VocalLabsAudioEffects.isAvailable() && this.nativeAudioEffectsInitialized;
   }
 
   private async configureCallAudioSession(): Promise<void> {

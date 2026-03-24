@@ -1,39 +1,49 @@
-# VocalLabs SDK
+# vocallabsai-sdk
 
-A lightweight React Native SDK for VocalLabs audio calls with built-in audio streaming. Connect directly to calls using call ID and WebSocket URL - no API polling, no authentication, just simple direct connections.
+React Native SDK for real-time VocalLabs voice calls over WebSocket.
 
 ## Features
 
-- 🎤 **Direct Connection** - Connect directly with call ID and WebSocket URL
-- 🎧 **Audio Streaming** - Real-time audio with WebSocket support
-- 🔇 **Mute Control** - Built-in mute/unmute functionality
-- 📈 **Statistics** - Real-time audio and sending stats
-- 🎯 **Event-Driven** - Comprehensive event system for all actions
-- 📝 **TypeScript** - Full TypeScript support with type definitions
-- ⚡ **Lightweight** - No authentication, no polling, minimal overhead
+- Direct WebSocket call connection
+- Real-time microphone streaming + remote playback
+- Built-in mute/unmute and volume control
+- Event-driven API for connection and call state
+- Live stats for sent/received audio
+- TypeScript support out of the box
+- Android native call-audio effects support:
+  - Acoustic Echo Canceler (AEC)
+  - Noise Suppressor (NS)
+  - Automatic Gain Control (AGC)
 
 ## Installation
 
 ```bash
-npm install vocal-native-sdk
-# or
-yarn add vocal-native-sdk
+npm install vocallabsai-sdk
 ```
+
+Peer dependencies used by this SDK:
+
+- react
+- react-native
+- react-native-audio-api
+- base-64
 
 ## Quick Start
 
-```typescript
-import VocalLabsSDK from 'vocal-native-sdk';
+```ts
+import VocalLabsSDK from 'vocallabsai-sdk';
 
-// 1. Initialize SDK (optional config)
 const sdk = new VocalLabsSDK({
   sampleRate: 8000,
   enableLogs: true,
 });
 
-// 2. Setup event listeners
 sdk.on('onAudioConnected', () => {
-  console.log('Audio connected!');
+  console.log('Audio connected');
+});
+
+sdk.on('onAudioDisconnected', () => {
+  console.log('Audio disconnected');
 });
 
 sdk.on('onUserConnected', (connected) => {
@@ -41,288 +51,177 @@ sdk.on('onUserConnected', (connected) => {
 });
 
 sdk.on('onMuteChanged', (isMuted) => {
-  console.log('Mute status:', isMuted);
+  console.log('Muted:', isMuted);
 });
 
-// 3. Connect with either callId, websocketUrl, or both
-// If both provided, websocketUrl is used (prioritized)
-
-// Option 1: Just websocket URL (callId extracted from query params)
-await sdk.connect({ websocketUrl: 'wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000' });
-
-// Option 2: Just call ID
-await sdk.connect({ callId: 'test-call-123' });
-
-// Option 3: Both (websocketUrl takes priority)
-await sdk.connect({ 
-  callId: 'test-call-123', 
-  websocketUrl: 'wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000' 
+sdk.on('onError', (error) => {
+  console.error('SDK error:', error);
 });
 
-// 4. Control the call
-sdk.toggleMute();              // Toggle mute
-sdk.setVolume(0.8);           // Set volume
-const stats = sdk.getStats(); // Get statistics
+await sdk.connect('wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000');
 
-// 5. Disconnect when done
+sdk.toggleMute();
+sdk.setVolume(0.9);
+
+const stats = sdk.getStats();
+console.log(stats);
+
 sdk.disconnect();
 ```
 
 ## Configuration
 
-### SDK Configuration Options
-
-```typescript
+```ts
 interface SDKConfig {
-  sampleRate?: number;       // Optional: Audio sample rate (default: 8000)
-  enableLogs?: boolean;      // Optional: Enable console logs (default: true)
+  sampleRate?: number;   // default: 8000
+  enableLogs?: boolean;  // default: true
+  audioProcessing?: {
+    mode?: 'off' | 'balanced' | 'aggressive';
+    remoteActiveWindowMs?: number;
+    noiseGateQuiet?: number;
+    noiseGateRemote?: number;
+    halfDuplexRms?: number;
+    halfDuplexPeak?: number;
+    duckLow?: number;
+    duckHigh?: number;
+    duckPivotRms?: number;
+    dcBlockerR?: number;
+  };
 }
 ```
 
-### Example with Custom Configuration
+## Core API
 
-```typescript
-const sdk = new VocalLabsSDK({
-  sampleRate: 16000,
-  enableLogs: false,
-});
-```
+### Connection
 
-## API Reference
-
-### Main Methods
-
-#### `initializeAudioService(audioService)`
-Initialize the SDK with your AudioAPIService instance. **Must be called before connecting audio.**
-
-```typescript
-const audioService = new AudioAPIService();
-sdk.initializeAudioService(audioService);
-```
-
-#### `connect({ callId?, websocketUrl? })`
-Connect directly to a call. Provide either callId, websocketUrl, or both. If both are provided, websocketUrl takes priority.
-
-```typescript
-// With just websocket URL (callId extracted from query params)
-await sdk.connect({ websocketUrl: 'wss://rupture2.vocallabs.ai/ws?callId=test-123&sampleRate=8000' });
-
-// With just call ID
-await sdk.connect({ callId: 'test-123' });
-
-// With both (websocket URL is prioritized)
-await sdk.connect({ 
-  callId: 'test-123', 
-  websocketUrl: 'wss://rupture2.vocallabs.ai/ws?callId=test-123&sampleRate=8000' 
-});
-```
-
-#### `disconnect()`
-Disconnect from the current call and clean up.
-
-```typescript
+```ts
+await sdk.connect(websocketUrl: string);
 sdk.disconnect();
 ```
 
-#### `toggleMute()`
-Toggle microphone mute state.
+### Mic + Playback Controls
 
-```typescript
-const isMuted = sdk.toggleMute();
-console.log('Muted:', isMuted);
+```ts
+const muted = sdk.toggleMute();
+sdk.setVolume(0.0 - 1.0);
 ```
 
-#### `setVolume(volume)`
-Set audio volume (0.0 to 1.0).
+### State + Stats
 
-```typescript
-sdk.setVolume(0.8);
-```
-
-#### `getState()`
-Get current SDK state.
-
-```typescript
+```ts
 const state = sdk.getState();
-console.log(state.isConnected, state.isMuted, state.currentCallId);
-```
-
-#### `getStats()`
-Get audio and sending statistics.
-
-```typescript
 const stats = sdk.getStats();
-console.log('Sent chunks:', stats.sending.sentChunks);
-console.log('Received chunks:', stats.audio.receivedChunks);
+const call = sdk.getCurrentCall();
 ```
 
-#### `dispose()`
-Clean up all resources.
+### Cleanup
 
-```typescript
+```ts
 await sdk.dispose();
+```
+
+## Native Audio Effects (Android)
+
+These methods allow controlling Android native call-audio processing.
+
+```ts
+await sdk.setAcousticEchoCanceler(true);
+await sdk.setNoiseSuppressor(true);
+await sdk.setAutomaticGainControl(true);
+
+const available = sdk.isNativeAudioEffectsAvailable();
+const status = await sdk.getNativeAudioEffectsStatus();
+```
+
+Example status object:
+
+```ts
+{
+  aecAvailable: true,
+  aecEnabled: true,
+  nsAvailable: true,
+  nsEnabled: true,
+  agcAvailable: true,
+  agcEnabled: true,
+  audioSessionId: 123
+}
 ```
 
 ## Events
 
-The SDK provides a comprehensive event system:
+Supported events:
 
-### Audio Events
-- `onAudioConnected` - Audio stream connected
-- `onAudioDisconnected` - Audio stream disconnected
-- `onUserConnected` - Other user connected to the call
-- `onUserDisconnected` - Other user disconnected
-- `onMuteChanged` - Mute state changed
-- `onStatsUpdate` - Statistics updated
+- onAudioConnected
+- onAudioDisconnected
+- onUserConnected
+- onUserDisconnected
+- onMuteChanged
+- onStatsUpdate
+- onError
+- onLog
 
-### General Events
-- `onError` - General error occurred
-- `onLog` - Log message (if logging enabled)
+Example:
 
-### Event Usage Example
-
-```typescript
-sdk.on('onAudioConnected', () => {
-  console.log('Audio connected successfully');
-});
-
-sdk.on('onUserConnected', (connected) => {
-  if (connected) {
-    console.log('Other user joined the call');
-  }
-});
-});
-
+```ts
 sdk.on('onStatsUpdate', ({ audio, sending }) => {
-  console.log(`Queue size: ${audio.queueSize}`);
-  console.log(`Sent chunks: ${sending.sentChunks}`);
+  console.log('Queue:', audio.queueSize);
+  console.log('Sent chunks:', sending.sentChunks);
 });
 ```
 
-## Complete Example with React Native Component
+## Android Notes
 
-```typescript
+- Grant RECORD_AUDIO permission at runtime.
+- Keep MODIFY_AUDIO_SETTINGS permission in AndroidManifest.
+- React Native autolinking should link native module automatically.
+
+If autolinking fails, add manual Android linking in your app's gradle files to include this package's android folder.
+
+## Minimal React Native Example
+
+```tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Button, Text } from 'react-native';
-import SubspaceCallSDK from 'subspace-call-sdk';
-import AudioAPIService from './services/AudioService';
+import VocalLabsSDK from 'vocallabsai-sdk';
 
-const CallScreen = ({ userId, friendId }) => {
+export default function CallScreen() {
   const sdkRef = useRef<VocalLabsSDK | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [muted, setMuted] = useState(false);
 
   useEffect(() => {
-    // Initialize SDK
-    const sdk = new VocalLabsSDK({
-      sampleRate: 8000,
-      enableLogs: true,
-    });
+    const sdk = new VocalLabsSDK({ sampleRate: 8000, enableLogs: true });
 
-    // Setup listeners
-    sdk.on('onAudioConnected', () => {
-      setIsConnected(true);
-      console.log('Audio connected');
-    });
-
-    sdk.on('onAudioDisconnected', () => {
-      setIsConnected(false);
-    });
-
-    sdk.on('onMuteChanged', (muted) => {
-      setIsMuted(muted);
-    });
+    sdk.on('onAudioConnected', () => setConnected(true));
+    sdk.on('onAudioDisconnected', () => setConnected(false));
+    sdk.on('onMuteChanged', (m) => setMuted(m));
 
     sdkRef.current = sdk;
 
     return () => {
       sdk.dispose();
-    };websocketUrl: string) => {
-    if (!sdkRef.current) return;
-    
-    try {
-      // Just provide the websocket URL
-      await sdkRef.current.connect({ websocketUrl }
-    try {
-      // Provide either callId, websocketUrl, or both
-      await sdkRef.current.connect(callId, websocketUrl);
-    } catch (error) {
-      console.error('Failed to connect:', error);
-    }
+    };
+  }, []);
+
+  const start = async () => {
+    await sdkRef.current?.connect('wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000');
   };
 
-  const endCall = () => {
-    sdkRef.current?.disconnect();
-  };
-
-  const toggleMute = () => {
-    sdkRef.current?.toggleMute();
-  };
+  const end = () => sdkRef.current?.disconnect();
+  const toggle = () => sdkRef.current?.toggleMute();
 
   return (
     <View>
-      <Text>Connected: {isConnected ? 'Yes' : 'No'}</Text>
-      <Text>Muted: {isMuted ? 'Yes' : 'No'}</Text>
-      
-      <Button 
-        title="Start Call" 
-        onPress={() => startCall('wss://rupture2.vocallabs.ai/ws?callId=test-123&sampleRate=8000')} 
-      />
-      <Button title="Toggle Mute" onPress={toggleMute} />
-      <Button title="End Call" onPress={endCall} />
+      <Text>Connected: {connected ? 'Yes' : 'No'}</Text>
+      <Text>Muted: {muted ? 'Yes' : 'No'}</Text>
+      <Button title="Start" onPress={start} />
+      <Button title="Toggle Mute" onPress={toggle} />
+      <Button title="End" onPress={end} />
     </View>
   );
-};
-
-export default CallScreen;
-```
-
-## Error Handling
-
-The SDK provides detailed error information:
-
-```typescript
-import { SDKError, ErrorCode } from 'vocal-native-sdk';
-
-try {
-  await sdk.connect({ websocketUrl: 'wss://rupture2.vocallabs.ai/ws?callId=test-123&sampleRate=8000' });
-} catch (error) {
-  if (error instanceof SDKError) {
-    switch (error.code) {
-      case ErrorCode.INVALID_CONFIG:
-        console.log('Invalid configuration or URL');
-        break;
-      case ErrorCode.AUDIO_CONNECTION_FAILED:
-        console.log('Audio connection failed');
-        break;
-      // ... handle other error codes
-    }
-  }
 }
 ```
-
-## TypeScript Support
-
-The SDK is written in TypeScript and provides full type definitions:
-
-```typescript
-import VocalLabsSDK, { 
-  CallData,
-  SDKState,
-  AudioStats,
-  SendingStats 
-} from 'vocal-native-sdk';
-```
-
-## Requirements
-
-- React Native >= 0.60.0
-- React >= 16.8.0
 
 ## License
 
 MIT
-
-## Support
-
-For issues and questions, please open an issue on GitHub.
