@@ -55,6 +55,7 @@
   "files": [
     "lib",
     "src",
+    "android",
     "README.md",
     "LICENSE"
   ],
