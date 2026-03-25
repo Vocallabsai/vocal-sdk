@@ -492,11 +492,8 @@ class ReactNativeAudioQueue {
     }
 
     if (this.audioFormat === 'audio/x-l16') {
-      const isLittle =
-        normalizedContentType.includes('l16le') ||
-        normalizedContentType.includes('endian=little') ||
-        normalizedContentType.includes('endian=le');
-      this.isLittleEndianL16 = isLittle;
+      // User confirmed all L16 is little-endian
+      this.isLittleEndianL16 = true;
     } else {
       this.isLittleEndianL16 = false;
     }
