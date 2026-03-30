@@ -204,6 +204,10 @@ export class AudioManager {
     return this.audioService.setAutomaticGainControl(enabled);
   }
 
+  async setSpeakerphone(enabled: boolean): Promise<boolean> {
+    return this.audioService.setSpeakerphone(enabled);
+  }
+
   /**
    * Get status of native audio effects
    */
