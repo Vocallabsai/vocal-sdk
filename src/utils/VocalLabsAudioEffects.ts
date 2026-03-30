@@ -49,8 +49,7 @@ class VocalLabsAudioEffects {
   private nativeChunkSubscription: any = null;
 
   constructor() {
-    // Only available on Android
-    if (Platform.OS === 'android') {
+    if (Platform.OS === 'android' || Platform.OS === 'ios') {
       this.nativeModule = NativeModules.VocalLabsAudioEffects;
       if (!this.nativeModule) {
         console.warn('VocalLabsAudioEffects native module not found. Audio effects will be unavailable.');
@@ -149,6 +148,24 @@ class VocalLabsAudioEffects {
         this.nativeChunkSubscription = null;
       }
     };
+  }
+
+  /**
+   * Toggle speaker (loudspeaker) vs earpiece output on Android.
+   * true  → speaker, false → earpiece
+   */
+  async setSpeakerphone(enabled: boolean): Promise<boolean> {
+    if (!this.nativeModule) {
+      return false;
+    }
+    try {
+      const result = await this.nativeModule.setSpeakerphone(enabled);
+      console.log('[AudioEffects] setSpeakerphone:', enabled);
+      return result;
+    } catch (error) {
+      console.error('[AudioEffects] Failed to set speakerphone:', error);
+      return false;
+    }
   }
 
   /**
@@ -291,7 +308,7 @@ class VocalLabsAudioEffects {
   }
 
   isAvailable(): boolean {
-    return !!this.nativeModule && Platform.OS === 'android';
+    return !!this.nativeModule && (Platform.OS === 'android' || Platform.OS === 'ios');
   }
 
   isActive(): boolean {

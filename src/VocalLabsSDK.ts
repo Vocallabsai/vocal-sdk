@@ -303,6 +303,14 @@ export class VocalLabsSDK {
   }
 
   /**
+   * Toggle speaker (loudspeaker) vs earpiece output (Android only).
+   * true → speaker, false → earpiece
+   */
+  async setSpeakerphone(enabled: boolean): Promise<boolean> {
+    return this.audioManager.setSpeakerphone(enabled);
+  }
+
+  /**
    * Clear audio queue
    */
   clearAudioQueue(): void {

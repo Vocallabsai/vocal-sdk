@@ -26,9 +26,11 @@ Add these permissions in your app `AndroidManifest.xml`:
 ```xml
 <uses-permission android:name="android.permission.RECORD_AUDIO" />
 <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+<uses-permission android:name="android.permission.BLUETOOTH" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 ```
 
-Also request microphone permission at runtime.
+Also request `RECORD_AUDIO` permission at runtime.
 
 ### 4) Linking
 
@@ -62,10 +64,12 @@ cd android && ./gradlew clean
 - Direct WebSocket call connection
 - Real-time microphone streaming + remote playback
 - Built-in mute/unmute and volume control
+- Speaker / earpiece toggle on Android
 - Event-driven API for connection and call state
 - Live stats for sent/received audio
 - TypeScript support out of the box
-- Android native call-audio effects support (AEC, NS, AGC)
+- Android: `MODE_IN_COMMUNICATION` + `STREAM_VOICE_CALL` audio routing — echo cancellation, hardware volume buttons, Bluetooth HFP, speaker toggle
+- iOS: `allowBluetoothHFP` audio session option for Bluetooth headset support
 
 ## Quick Start
 
@@ -159,9 +163,28 @@ const call = sdk.getCurrentCall();
 await sdk.dispose();
 ```
 
-## Native Audio Effects (Android)
+## Native Audio (Android)
 
-These methods allow controlling Android native call-audio processing.
+The SDK uses `AudioManager.MODE_IN_COMMUNICATION` and requests audio focus on `STREAM_VOICE_CALL`. This gives you:
+
+- **Echo cancellation** — `MODE_IN_COMMUNICATION` enables hardware AEC automatically
+- **Hardware volume buttons** — control call volume via `STREAM_VOICE_CALL`
+- **Speaker / earpiece toggle** — `setSpeakerphoneOn` via the SDK
+- **Bluetooth HFP** — audio routed through Bluetooth headsets when connected
+
+### Speaker Toggle
+
+```ts
+// Switch to loudspeaker
+await sdk.setSpeakerphone(true);
+
+// Switch back to earpiece
+await sdk.setSpeakerphone(false);
+```
+
+### Audio Effects (AEC / NS / AGC)
+
+Fine-grained control over hardware audio processing:
 
 ```ts
 await sdk.setAcousticEchoCanceler(true);
@@ -210,8 +233,10 @@ sdk.on('onStatsUpdate', ({ audio, sending }) => {
 
 ## Android Notes
 
-- Grant RECORD_AUDIO permission at runtime.
-- Keep MODIFY_AUDIO_SETTINGS permission in AndroidManifest.
+- Grant `RECORD_AUDIO` permission at runtime.
+- Keep `MODIFY_AUDIO_SETTINGS` in AndroidManifest.
+- For Bluetooth headset support, add `BLUETOOTH` / `BLUETOOTH_CONNECT` permissions.
+- The SDK sets `MODE_IN_COMMUNICATION` on call start and resets to `MODE_NORMAL` on stop.
 - Prefer autolinking first; use manual linking only if needed.
 
 ## Minimal React Native Example
@@ -225,6 +250,7 @@ export default function CallScreen() {
   const sdkRef = useRef<VocalLabsSDK | null>(null);
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [speaker, setSpeaker] = useState(false);
 
   useEffect(() => {
     const sdk = new VocalLabsSDK({ sampleRate: 8000, enableLogs: true });
@@ -246,13 +272,20 @@ export default function CallScreen() {
 
   const end = () => sdkRef.current?.disconnect();
   const toggle = () => sdkRef.current?.toggleMute();
+  const toggleSpeaker = async () => {
+    const next = !speaker;
+    await sdkRef.current?.setSpeakerphone(next);
+    setSpeaker(next);
+  };
 
   return (
     <View>
       <Text>Connected: {connected ? 'Yes' : 'No'}</Text>
       <Text>Muted: {muted ? 'Yes' : 'No'}</Text>
+      <Text>Speaker: {speaker ? 'On' : 'Earpiece'}</Text>
       <Button title="Start" onPress={start} />
       <Button title="Toggle Mute" onPress={toggle} />
+      <Button title="Toggle Speaker" onPress={toggleSpeaker} />
       <Button title="End" onPress={end} />
     </View>
   );

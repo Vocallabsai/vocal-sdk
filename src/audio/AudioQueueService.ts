@@ -1569,6 +1569,21 @@ export class AudioQueueService {
   }
 
   /**
+   * Toggle speaker (loudspeaker) vs earpiece on Android.
+   * true → speaker, false → earpiece
+   */
+  async setSpeakerphone(enabled: boolean): Promise<boolean> {
+    try {
+      const result = await VocalLabsAudioEffects.setSpeakerphone(enabled);
+      this.log(`Speakerphone ${enabled ? 'on' : 'off (earpiece)'}`, 'info');
+      return result;
+    } catch (error) {
+      this.log(`Failed to set speakerphone: ${error}`, 'warning');
+      return false;
+    }
+  }
+
+  /**
    * Check if native audio effects are available and initialized
    */
   isNativeAudioEffectsAvailable(): boolean {

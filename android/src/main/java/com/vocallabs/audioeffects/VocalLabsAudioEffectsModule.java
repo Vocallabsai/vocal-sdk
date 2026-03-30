@@ -10,6 +10,7 @@ import android.media.audiofx.NoiseSuppressor;
 import android.content.Context;
 import android.util.Log;
 import android.util.Base64;
+import android.os.Build;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
@@ -28,6 +29,7 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
     private NoiseSuppressor noiseSuppressor;
     private AutomaticGainControl automaticGainControl;
     private AudioManager audioManager;
+    private android.media.AudioFocusRequest audioFocusRequest = null;
     private int currentAudioSessionId = -1;
     private boolean isAecEnabled = false;
     private boolean isNsEnabled = false;
@@ -126,7 +128,8 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
 
             if (audioManager != null) {
                 audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-                audioManager.setSpeakerphoneOn(true);
+                audioManager.setSpeakerphoneOn(false); // default to earpiece; JS can toggle
+                requestAudioFocus();
             }
 
             recorder = new AudioRecord(
@@ -280,6 +283,25 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
     }
 
     /**
+     * Toggle speaker / earpiece output.
+     * true  → speaker (loudspeaker)
+     * false → earpiece
+     */
+    @ReactMethod
+    public void setSpeakerphone(boolean enabled, Promise promise) {
+        try {
+            if (audioManager != null) {
+                audioManager.setSpeakerphoneOn(enabled);
+                Log.d(TAG, "setSpeakerphoneOn: " + enabled);
+            }
+            promise.resolve(true);
+        } catch (Exception e) {
+            Log.e(TAG, "Error setting speakerphone: " + e.getMessage(), e);
+            promise.reject("SPEAKER_ERROR", "Failed to set speakerphone: " + e.getMessage());
+        }
+    }
+
+    /**
      * Clean up and release all audio effects
      */
     @ReactMethod
@@ -294,6 +316,35 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
     }
 
     // Private helper methods
+
+    @SuppressWarnings("deprecation")
+    private void requestAudioFocus() {
+        if (audioManager == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest = new android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .build();
+            audioManager.requestAudioFocus(audioFocusRequest);
+        } else {
+            audioManager.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void abandonAudioFocus() {
+        if (audioManager == null) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (audioFocusRequest != null) {
+                audioManager.abandonAudioFocus(audioFocusRequest);
+                audioFocusRequest = null;
+            }
+        } else {
+            audioManager.abandonAudioFocus(null);
+        }
+    }
 
     private boolean createAudioEffects(int audioSessionId) {
         boolean createdAny = false;
@@ -442,7 +493,9 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
 
         if (audioManager != null) {
             try {
+                audioManager.setSpeakerphoneOn(false);
                 audioManager.setMode(AudioManager.MODE_NORMAL);
+                abandonAudioFocus();
             } catch (Exception ignored) {
             }
         }
