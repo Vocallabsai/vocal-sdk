@@ -640,9 +640,9 @@ export class AudioQueueService {
 
   private readonly callSessionOptions: SessionOptions = {
     iosCategory: 'playAndRecord',
-    iosMode: 'voiceChat',
+    iosMode: 'default',
     // Keep speaker route while using voice processing mode where available.
-    iosOptions: ['defaultToSpeaker'],
+    iosOptions: ['defaultToSpeaker', 'allowBluetoothHFP'],
   };
 
   constructor() {
