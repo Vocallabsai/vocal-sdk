@@ -338,7 +338,7 @@ public class VocalLabsAudioEffectsModule extends ReactContextBaseJavaModule {
         if (audioManager == null) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (audioFocusRequest != null) {
-                audioManager.abandonAudioFocus(audioFocusRequest);
+                audioManager.abandonAudioFocusRequest(audioFocusRequest);
                 audioFocusRequest = null;
             }
         } else {

@@ -1,6 +1,6 @@
-import React
 import AVFoundation
 import Foundation
+import React
 
 @objc(VocalLabsAudioEffectsModule)
 class VocalLabsAudioEffectsModule: RCTEventEmitter {
@@ -10,13 +10,40 @@ class VocalLabsAudioEffectsModule: RCTEventEmitter {
   private var gainNode: AVAudioUnitEQ?
   private var isRecording: Bool = false
   private var bufferTapInstalled: Bool = false
+  private var hasListeners: Bool = false
 
-  override static func requiresMainQueueSetup() -> Bool {
+  override init() {
+    super.init()
+  }
+
+  @objc override static func requiresMainQueueSetup() -> Bool {
     return false
+  }
+
+  @objc override static func moduleName() -> String! {
+    return "VocalLabsAudioEffectsModule"
   }
 
   override func supportedEvents() -> [String]! {
     return ["onNativeAudioChunk"]
+  }
+
+  override func startObserving() {
+    hasListeners = true
+  }
+
+  override func stopObserving() {
+    hasListeners = false
+  }
+
+  override func invalidate() {
+    if let audioEngine = audioEngine, audioEngine.isRunning {
+      inputNode?.removeTap(onBus: 0)
+      bufferTapInstalled = false
+      audioEngine.stop()
+      isRecording = false
+    }
+    super.invalidate()
   }
 
   @objc
@@ -93,6 +120,7 @@ class VocalLabsAudioEffectsModule: RCTEventEmitter {
   }
 
   private func processAudioBuffer(buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
+    guard hasListeners else { return }
     guard let channelData = buffer.int16ChannelData else { return }
     let channelCount = Int(format.channelCount)
     let frameLength = Int(buffer.frameLength)

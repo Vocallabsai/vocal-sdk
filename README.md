@@ -19,7 +19,28 @@ Peer dependencies used by this SDK:
 - react-native-audio-api
 - base-64
 
-### 3) Android permissions
+### 3) iOS setup
+
+Add the native pod to your `ios/Podfile` inside the `target` block:
+
+```ruby
+pod 'VocalLabsAudioEffects', :path => '../node_modules/vocallabsai-sdk/ios'
+```
+
+Then run:
+
+```bash
+cd ios && pod install
+```
+
+Add the microphone permission to `ios/<YourApp>/Info.plist`:
+
+```xml
+<key>NSMicrophoneUsageDescription</key>
+<string>This app needs access to your microphone for voice calls.</string>
+```
+
+### 4) Android permissions
 
 Add these permissions in your app `AndroidManifest.xml`:
 
@@ -32,7 +53,7 @@ Add these permissions in your app `AndroidManifest.xml`:
 
 Also request `RECORD_AUDIO` permission at runtime.
 
-### 4) Linking
+### 5) Linking
 
 For React Native 0.60+, autolinking should work automatically.
 
@@ -53,7 +74,7 @@ dependencies {
 }
 ```
 
-### 5) Rebuild app
+### 6) Rebuild app
 
 ```bash
 cd android && ./gradlew clean

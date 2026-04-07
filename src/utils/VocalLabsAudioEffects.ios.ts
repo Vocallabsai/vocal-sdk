@@ -1,4 +1,4 @@
-import { NativeModules } from 'react-native/Libraries/BatchedBridge/NativeModules';
+const { NativeModules, NativeEventEmitter } = require('react-native');
 const { VocalLabsAudioEffectsModule } = NativeModules;
 
 export default {
@@ -9,8 +9,8 @@ export default {
   isNativeRecording: () => VocalLabsAudioEffectsModule.isNativeRecording(),
   startNativeRecording: (options?: object) => VocalLabsAudioEffectsModule.startNativeRecording(options || {}),
   stopNativeRecording: () => VocalLabsAudioEffectsModule.stopNativeRecording(),
+  setSpeakerphone: (enabled: boolean) => VocalLabsAudioEffectsModule.setSpeakerphone(enabled),
   addAudioChunkListener: (callback: (event: any) => void) => {
-    const { NativeEventEmitter } = require('react-native');
     const emitter = new NativeEventEmitter(VocalLabsAudioEffectsModule);
     return emitter.addListener('onNativeAudioChunk', callback);
   },

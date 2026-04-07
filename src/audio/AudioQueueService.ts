@@ -642,7 +642,7 @@ export class AudioQueueService {
     iosCategory: 'playAndRecord',
     iosMode: 'default',
     // Keep speaker route while using voice processing mode where available.
-    iosOptions: ['defaultToSpeaker', 'allowBluetoothHFP'],
+    iosOptions: ['allowBluetoothHFP'],
   };
 
   constructor() {
