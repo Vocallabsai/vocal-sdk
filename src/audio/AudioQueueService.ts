@@ -1198,8 +1198,12 @@ export class AudioQueueService {
           if (stopResult.status === 'error') {
             this.log(`AudioRecorder stop error: ${stopResult.message}`, 'warning');
           }
+          try {
+            this.audioRecorder.disconnect();
+          } catch (e) {}
+          this.audioRecorder = null;
         }
-        
+
         // Release native audio effects
         if (this.nativeAudioEffectsInitialized && VocalLabsAudioEffects.isAvailable()) {
           try {
@@ -1210,10 +1214,10 @@ export class AudioQueueService {
             console.warn('⚠️ Failed to release native audio effects:', error);
           }
         }
-        
+
         this.isRecording = false;
         this.audioStreamBuffer = [];
-        await this.deactivateCallAudioSession();
+        // Keep AVAudioSession active across calls — see disconnect() comment.
         console.log('✅ Microphone capture stopped');
         this.log('Recording stopped', 'info');
       }
@@ -1338,7 +1342,7 @@ export class AudioQueueService {
 
 
 
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     console.log('🔌 Disconnecting...');
     this.log('Starting disconnect', 'info');
     
@@ -1372,23 +1376,24 @@ export class AudioQueueService {
     }
     
     if (this.isRecording) {
-      this.stopRecording();
+      await this.stopRecording();
     }
-    
+
     if (this.audioQueue) {
       this.audioQueue.clear();
     }
-    
+
     this.sentChunks = 0;
     this.totalSentBytes = 0;
     this.lastSentTime = 0;
     this.audioStreamBuffer = [];
     this.hasReceivedFirstData = false;
 
-    this.deactivateCallAudioSession().catch((error) => {
-      this.log(`Audio session cleanup error: ${error}`, 'warning');
-    });
-    
+    // NOTE: do not deactivate iOS AVAudioSession here. react-native-audio-api's input
+    // node loses its 0Hz format if the session is deactivated, and the next start() throws
+    // "input hw format invalid" / Exception in HostFunction. Keeping the session active
+    // keeps the recorder format valid for the next call.
+
     this.updateConnectionState(false);
     this.log('Disconnected', 'info');
     console.log('✅ Disconnected');
@@ -1430,8 +1435,8 @@ export class AudioQueueService {
   async dispose() {
     console.log('🗑️ Disposing AudioQueueService...');
     this.log('Disposing service', 'info');
-    
-    this.disconnect();
+
+    await this.disconnect();
 
     await this.deactivateCallAudioSession();
 

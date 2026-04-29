@@ -206,11 +206,11 @@ export class VocalLabsSDK {
   /**
    * Disconnect from current call
    */
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     this.logger.info('Disconnecting...');
 
     // Disconnect audio
-    this.audioManager.disconnect();
+    await this.audioManager.disconnect();
 
     // Clear call
     this.callManager.clearCurrentCall();
@@ -397,7 +397,7 @@ export class VocalLabsSDK {
 
     // Disconnect if connected
     if (this.state.isConnected) {
-      this.disconnect();
+      await this.disconnect();
     }
 
     // Dispose managers

@@ -126,9 +126,9 @@ export class AudioManager {
   /**
    * Disconnect audio
    */
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     this.logger.info('Disconnecting audio...');
-    this.audioService.disconnect();
+    await this.audioService.disconnect();
   }
 
   /**
