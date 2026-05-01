@@ -168,6 +168,20 @@ class VocalLabsAudioEffects {
     }
   }
 
+  async enableVoiceProcessing(): Promise<{ success: boolean; reason?: string }> {
+    if (!this.nativeModule || typeof this.nativeModule.enableVoiceProcessing !== 'function') {
+      return { success: false, reason: 'native method unavailable' };
+    }
+    try {
+      const result = await this.nativeModule.enableVoiceProcessing();
+      console.log('[AudioEffects] enableVoiceProcessing:', result);
+      return result;
+    } catch (error) {
+      console.error('[AudioEffects] Failed to enable voice processing:', error);
+      return { success: false, reason: String(error) };
+    }
+  }
+
   /**
    * Enable or disable Acoustic Echo Cancellation
    */

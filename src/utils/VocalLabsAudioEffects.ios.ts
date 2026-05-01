@@ -10,6 +10,7 @@ export default {
   startNativeRecording: (options?: object) => VocalLabsAudioEffectsModule.startNativeRecording(options || {}),
   stopNativeRecording: () => VocalLabsAudioEffectsModule.stopNativeRecording(),
   setSpeakerphone: (enabled: boolean) => VocalLabsAudioEffectsModule.setSpeakerphone(enabled),
+  enableVoiceProcessing: () => VocalLabsAudioEffectsModule.enableVoiceProcessing(),
   addAudioChunkListener: (callback: (event: any) => void) => {
     const emitter = new NativeEventEmitter(VocalLabsAudioEffectsModule);
     return emitter.addListener('onNativeAudioChunk', callback);

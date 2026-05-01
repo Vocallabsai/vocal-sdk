@@ -119,6 +119,61 @@ class VocalLabsAudioEffectsModule: RCTEventEmitter {
     }
   }
 
+  /// Enables iOS hardware Voice Processing I/O (AEC, NS, AGC) on the shared
+  /// AVAudioEngine that `react-native-audio-api` uses internally for recording.
+  ///
+  /// We access the audio-api's `AudioEngine` singleton via Objective-C runtime
+  /// — that way we don't need to fork or patch react-native-audio-api itself.
+  /// Without VPIO, speakerphone output leaks into the mic and the remote side
+  /// hears an echo of their own voice.
+  ///
+  /// Call this AFTER configuring the audio session as PlayAndRecord/voiceChat
+  /// and BEFORE the recorder attaches its sink node (i.e. before
+  /// AudioRecorder.onAudioReady on the JS side).
+  @objc
+  func enableVoiceProcessing(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard #available(iOS 13.0, *) else {
+      resolve(["success": false, "reason": "iOS 13+ required"])
+      return
+    }
+
+    // Look up react-native-audio-api's AudioEngine class at runtime.
+    guard let audioEngineClass = NSClassFromString("AudioEngine") as? NSObject.Type else {
+      resolve(["success": false, "reason": "AudioEngine class not found"])
+      return
+    }
+
+    // Call +sharedInstance via dynamic dispatch.
+    let sharedSelector = NSSelectorFromString("sharedInstance")
+    guard audioEngineClass.responds(to: sharedSelector),
+          let sharedInstance = audioEngineClass.perform(sharedSelector)?.takeUnretainedValue() as? NSObject else {
+      resolve(["success": false, "reason": "sharedInstance unavailable"])
+      return
+    }
+
+    // Pull the underlying AVAudioEngine from the wrapper via KVC.
+    guard let engine = sharedInstance.value(forKey: "audioEngine") as? AVAudioEngine else {
+      resolve(["success": false, "reason": "audioEngine property missing"])
+      return
+    }
+
+    // VPIO requires PlayAndRecord — bail out gracefully if session isn't set up.
+    let session = AVAudioSession.sharedInstance()
+    guard session.category == .playAndRecord else {
+      resolve(["success": false, "reason": "session category is \(session.category.rawValue), expected playAndRecord"])
+      return
+    }
+
+    do {
+      try engine.inputNode.setVoiceProcessingEnabled(true)
+      NSLog("[VocalLabs] ✅ Voice processing (AEC/NS/AGC) enabled on shared input node")
+      resolve(["success": true])
+    } catch {
+      NSLog("[VocalLabs] ❌ Failed to enable voice processing: \(error.localizedDescription)")
+      resolve(["success": false, "reason": error.localizedDescription])
+    }
+  }
+
   private func processAudioBuffer(buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
     guard hasListeners else { return }
     guard let channelData = buffer.int16ChannelData else { return }

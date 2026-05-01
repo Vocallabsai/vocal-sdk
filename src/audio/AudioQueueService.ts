@@ -640,7 +640,7 @@ export class AudioQueueService {
 
   private readonly callSessionOptions: SessionOptions = {
     iosCategory: 'playAndRecord',
-    iosMode: 'default',
+    iosMode: 'voiceChat',
     // Keep speaker route while using voice processing mode where available.
     iosOptions: ['allowBluetoothHFP'],
   };
@@ -827,7 +827,23 @@ export class AudioQueueService {
       }
 
       await this.configureCallAudioSession();
-      
+
+      // Enable iOS hardware Voice Processing I/O on the shared audio engine
+      // BEFORE the recorder attaches its sink node. This routes mic input
+      // through AEC/NS/AGC and prevents speakerphone echo. No-op on Android
+      // (Android already gets AEC via MODE_IN_COMMUNICATION).
+      if (
+        Platform.OS === 'ios' &&
+        typeof (VocalLabsAudioEffects as any).enableVoiceProcessing === 'function'
+      ) {
+        try {
+          const vpResult = await (VocalLabsAudioEffects as any).enableVoiceProcessing();
+          this.log(`Voice processing: ${JSON.stringify(vpResult)}`, 'info');
+        } catch (e) {
+          this.log(`enableVoiceProcessing threw: ${e}`, 'warning');
+        }
+      }
+
       // Hardcode to 8000 Hz, 320 bytes per packet (160 samples = 20ms)
       const bufferSize = 160;
 

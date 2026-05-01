@@ -15,4 +15,5 @@ RCT_EXTERN_METHOD(stopEffect:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromis
 RCT_EXTERN_METHOD(setGain:(nonnull NSNumber *)gain resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(isNativeRecording:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(setSpeakerphone:(BOOL)enabled resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(enableVoiceProcessing:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 @end
