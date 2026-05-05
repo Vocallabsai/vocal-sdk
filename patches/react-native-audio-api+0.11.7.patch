@@ -1,0 +1,41 @@
+diff --git a/node_modules/react-native-audio-api/ios/audioapi/ios/system/AudioEngine.mm b/node_modules/react-native-audio-api/ios/audioapi/ios/system/AudioEngine.mm
+index ae0da0c..2c2e1fe 100644
+--- a/node_modules/react-native-audio-api/ios/audioapi/ios/system/AudioEngine.mm
++++ b/node_modules/react-native-audio-api/ios/audioapi/ios/system/AudioEngine.mm
+@@ -74,6 +74,19 @@ - (void)attachInputNode:(AVAudioSinkNode *)inputNode format:(AVAudioFormat *)for
+ {
+   self.inputNode = inputNode;
+   [self.audioEngine attachNode:inputNode];
++  // Enable iOS Voice Processing I/O on the hardware input node so AEC, noise
++  // suppression and AGC are applied before frames reach the recorder. Without
++  // this, the speaker output is picked up by the mic and the remote side hears
++  // an echo of their own voice. setVoiceProcessingEnabled requires iOS 13+.
++  if (@available(iOS 13.0, *)) {
++    NSError *vpError = nil;
++    BOOL ok = [self.audioEngine.inputNode setVoiceProcessingEnabled:YES error:&vpError];
++    if (ok && !vpError) {
++      NSLog(@"[AudioEngine] ✅ Voice processing (AEC/NS/AGC) ENABLED on input node");
++    } else {
++      NSLog(@"[AudioEngine] ❌ Failed to enable voice processing: %@", vpError);
++    }
++  }
+   [self.audioEngine connect:self.audioEngine.inputNode to:inputNode format:format];
+ }
+ 
+@@ -167,6 +180,16 @@ - (void)rebuildAudioEngine
+ 
+   if (self.inputNode) {
+     [self.audioEngine attachNode:self.inputNode];
++    // Re-enable voice processing AEC after engine rebuild — see attachInputNode.
++    if (@available(iOS 13.0, *)) {
++      NSError *vpError = nil;
++      BOOL ok = [self.audioEngine.inputNode setVoiceProcessingEnabled:YES error:&vpError];
++      if (ok && !vpError) {
++        NSLog(@"[AudioEngine] ✅ Voice processing re-enabled after rebuild");
++      } else {
++        NSLog(@"[AudioEngine] ❌ Failed to re-enable voice processing: %@", vpError);
++      }
++    }
+     [self.audioEngine connect:self.audioEngine.inputNode to:self.inputNode format:nil];
+   }
+ }
