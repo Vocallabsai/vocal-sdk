@@ -1304,6 +1304,17 @@ export class AudioQueueService {
         };
         this.ws?.send(JSON.stringify(hangupEvent));
         console.log('📤 Sent hangup_source event');
+        // PATCH: eager-start — don't wait for server first non-silence frame
+        if (!this.hasReceivedFirstData) {
+          this.hasReceivedFirstData = true;
+          console.log('⚡ Eager start: launching recording on ws.onopen');
+          this.startRecording().catch((e) => {
+            console.error('❌ Eager startRecording failed:', e);
+          });
+          if (this.userConnectedCallback) {
+            this.userConnectedCallback(true);
+          }
+        }
       } catch (error) {
         const errorMsg = `Error sending initial events: ${error}`;
         console.error('❌ ' + errorMsg);
