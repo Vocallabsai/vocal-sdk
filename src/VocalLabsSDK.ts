@@ -50,7 +50,7 @@ export class VocalLabsSDK {
   private logger: Logger;
 
   // Configuration
-  private config: SDKConfig & { sampleRate: number; enableLogs: boolean };
+  private config: SDKConfig & { sampleRate: number; enableLogs: boolean; transferBaseUrl: string };
 
   // State
   private state: SDKState = {
@@ -78,6 +78,7 @@ export class VocalLabsSDK {
       sampleRate: config?.sampleRate || DEFAULT_CONFIG.SAMPLE_RATE,
       enableLogs: config?.enableLogs !== false,
       audioProcessing: config?.audioProcessing,
+      transferBaseUrl: config?.transferBaseUrl || DEFAULT_CONFIG.TRANSFER_BASE_URL,
     };
 
     // Initialize logger
@@ -193,6 +194,7 @@ export class VocalLabsSDK {
       await this.audioManager.connect({
         sampleRate: this.config.sampleRate,
         wsUrl: websocketUrl,
+        transferBaseUrl: this.config.transferBaseUrl,
       });
 
       this.logger.info('✅ Connected successfully');

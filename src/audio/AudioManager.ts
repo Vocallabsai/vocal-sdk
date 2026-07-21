@@ -108,7 +108,8 @@ export class AudioManager {
 
     try {
       await this.audioService.connectWithCustomUrl(
-        options.wsUrl
+        options.wsUrl,
+        options.transferBaseUrl
       );
 
       this.logger.info('✅ Audio connection successful');

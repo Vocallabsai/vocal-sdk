@@ -9,6 +9,8 @@ export interface SDKConfig {
   sampleRate?: number;
   enableLogs?: boolean;
   audioProcessing?: AudioProcessingConfig;
+  /** Base WS URL used when a `human-transfer` event hands the call to an agent. */
+  transferBaseUrl?: string;
 }
 
 export type AudioProcessingMode = 'off' | 'balanced' | 'aggressive';
@@ -58,6 +60,7 @@ export interface SendingStats {
 export interface AudioConnectionOptions {
   sampleRate?: number;
   wsUrl: string;
+  transferBaseUrl?: string;
 }
 
 // ============= Event Callbacks =============

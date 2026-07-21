@@ -8,6 +8,7 @@ import { AudioContext, AudioBuffer, AudioBufferSourceNode, GainNode, AudioRecord
 import { Platform, PermissionsAndroid } from 'react-native';
 import { decode as atob, encode as btoa } from 'base-64';
 import { AudioProcessingConfig, AudioProcessingMode } from '../types';
+import { DEFAULT_CONFIG } from '../config/constants';
 import VocalLabsAudioEffects, { type AudioEffectsStatus, type NativeAudioChunkEvent } from '../utils/VocalLabsAudioEffects';
 
 interface AudioStats {
@@ -38,6 +39,8 @@ interface WebSocketMessage {
     sampleRate?: number;
     payload?: string;
   };
+  humanId?: string;
+  name?: string;
 }
 
 type LogType = 'info' | 'error' | 'warning';
@@ -574,6 +577,7 @@ export class AudioQueueService {
   public isMuted: boolean;
   private isRecording: boolean;
   private sampleRate: number;
+  private transferBaseUrl: string;
   
   // Statistics
   private sentChunks: number;
@@ -653,6 +657,7 @@ export class AudioQueueService {
     this.isMuted = false;
     this.isRecording = false;
     this.sampleRate = 8000; // Hardcoded to 8000 Hz
+    this.transferBaseUrl = DEFAULT_CONFIG.TRANSFER_BASE_URL;
     
     this.sentChunks = 0;
     this.lastSentTime = 0;
@@ -734,7 +739,12 @@ export class AudioQueueService {
   handleWebSocketMessage(event: any): void {
     try {
       const message: WebSocketMessage = JSON.parse(event.data as string);
-      
+
+      if (message.event === 'humanTransfer') {
+        this.handleHumanTransfer(message);
+        return;
+      }
+
       if (message.event === 'playAudio' && message.media && message.media.payload && this.audioQueue) {
         try {
           if (!this.hasReceivedFirstData && !(/^A+=*$/.test(message.media.payload))) {
@@ -1244,10 +1254,13 @@ export class AudioQueueService {
     }
   }
 
-  async connectWithCustomUrl(wsUrl: string) {
+  async connectWithCustomUrl(wsUrl: string, transferBaseUrl?: string) {
     // Hardcode sending sample rate to 8000 Hz
     this.sampleRate = 8000;
-    
+    if (transferBaseUrl) {
+      this.transferBaseUrl = transferBaseUrl;
+    }
+
     console.log(`🎯 Hardcoded Sample Rate: 8000Hz`);
     
     // Clean up old WebSocket
@@ -1364,6 +1377,145 @@ export class AudioQueueService {
 
         this.updateConnectionState(false);
       }, 75);
+    };
+  }
+
+  /**
+   * Hand the live call off to a human agent. Opens a new socket for `humanId`,
+   * routes audio to it, then quietly closes the previous socket. Recording, the
+   * playback queue, and connection state are left untouched so the call continues.
+   */
+  private handleHumanTransfer(message: WebSocketMessage): void {
+    let transferUrl: string;
+    try {
+      transferUrl = this.buildTransferUrl(message.humanId);
+    } catch (error) {
+      this.log(`Invalid human-transfer event: ${error}`, 'error');
+      return;
+    }
+
+    console.log(`🔀 Human transfer requested → ${transferUrl}`);
+    this.log(`Human transfer to ${message.name || message.humanId}`, 'info');
+
+    this.switchWebSocket(transferUrl).catch((error) => {
+      // Switch failed — the original socket is still live, so the call continues.
+      console.error('❌ Human transfer failed:', error);
+      this.log(`Human transfer failed: ${error}`, 'error');
+    });
+  }
+
+  /**
+   * Build the human-transfer endpoint from the configured transfer base URL,
+   * carrying only `callId` (the agent's id) and the session sample rate. Any
+   * query params already on `transferBaseUrl` are discarded.
+   */
+  private buildTransferUrl(humanId?: string): string {
+    if (!humanId || typeof humanId !== 'string') {
+      throw new Error('missing humanId');
+    }
+    const base = this.transferBaseUrl.split('?')[0];
+    return `${base}?callId=${encodeURIComponent(humanId)}&sampleRate=${this.sampleRate}`;
+  }
+
+  /**
+   * Open `newUrl`, route the live audio stream to it, and close the old socket
+   * once the new one is open. On failure the old socket is left intact.
+   */
+  private switchWebSocket(newUrl: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const oldWs = this.ws;
+      const newWs = new WebSocket(newUrl);
+      let settled = false;
+
+      const timeout = setTimeout(() => {
+        if (newWs.readyState !== WebSocket.OPEN) {
+          try { newWs.close(); } catch (e) {}
+          if (!settled) {
+            settled = true;
+            reject(new Error('Human transfer connection timed out'));
+          }
+        }
+      }, 5000);
+
+      newWs.onopen = () => {
+        clearTimeout(timeout);
+        console.log('✅ Human transfer WebSocket connected');
+        this.log('Human transfer socket connected', 'info');
+
+        // Send the same handshake the primary connection uses.
+        try {
+          newWs.send(JSON.stringify({
+            event: 'start',
+            start: {
+              streamId: 'inbound',
+              mediaFormat: { Encoding: 'audio/x-l16', sampleRate: 8000 },
+            },
+          }));
+          newWs.send(JSON.stringify({ event: 'hangup_source', source: 'in_progress' }));
+        } catch (error) {
+          this.log(`Error sending transfer handshake: ${error}`, 'error');
+        }
+
+        // Route audio to the new socket and wire its handlers *before* tearing
+        // down the old one, so no media is lost mid-swap.
+        this.ws = newWs;
+        this.attachTransferHandlers(newWs);
+
+        // Detach the old socket's handlers first so its close does not stop
+        // recording or flip connection state, then close it.
+        if (oldWs && oldWs !== newWs) {
+          oldWs.onopen = null;
+          oldWs.onmessage = null;
+          oldWs.onclose = null;
+          oldWs.onerror = null;
+          try { oldWs.close(); } catch (e) {}
+        }
+
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+
+      newWs.onerror = () => {
+        clearTimeout(timeout);
+        if (!settled) {
+          settled = true;
+          reject(new Error('Human transfer connection failed'));
+        }
+      };
+    });
+  }
+
+  /**
+   * Wire the long-lived message/close/error handlers onto the post-transfer
+   * socket. Close/error from a socket already swapped out are ignored.
+   */
+  private attachTransferHandlers(ws: WebSocket): void {
+    ws.onmessage = (event: any) => {
+      try {
+        this.handleWebSocketMessage(event);
+      } catch (error) {
+        console.error('❌ Error in onmessage handler:', error);
+        this.log(`Message handler error: ${error}`, 'error');
+      }
+    };
+
+    ws.onclose = (event: any) => {
+      if (ws !== this.ws) return;
+      const closeMsg = `WebSocket disconnected: ${event.code} ${event.reason}`;
+      console.log('❌ ' + closeMsg);
+      this.log(closeMsg, 'info');
+      if (this.isRecording) {
+        this.stopRecording();
+      }
+      this.updateConnectionState(false);
+    };
+
+    ws.onerror = (error: any) => {
+      if (ws !== this.ws) return;
+      console.error('❌ WebSocket error:', error);
+      this.log(`WebSocket error: ${JSON.stringify(error)}`, 'error');
     };
   }
 
