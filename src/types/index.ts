@@ -6,6 +6,12 @@
 // ============= SDK Configuration =============
 
 export interface SDKConfig {
+  /**
+   * @deprecated Not applied. The transport rate is negotiated from the call URL
+   * (`_web_<rate>` token, or a `sampleRate` query param), which is the server's
+   * contract — a client-side override would desync the two. Falls back to 8000
+   * when the URL carries neither.
+   */
   sampleRate?: number;
   enableLogs?: boolean;
   audioProcessing?: AudioProcessingConfig;
@@ -52,7 +58,12 @@ export interface SendingStats {
   lastSentTime: number;
   isRecording: boolean;
   isMuted: boolean;
+  /** Capture/send rate, from the `_web_<rate>` token in the call URL. */
   sampleRate: number;
+  /** Rate the server streams back at — not necessarily `sampleRate`. */
+  receiveSampleRate: number;
+  /** Codec the server streams back in. Outgoing audio is always `audio/x-l16`. */
+  receiveFormat: 'audio/x-l16' | 'audio/x-mulaw';
   bufferSize: number;
   isAudioInitialized: boolean;
 }
@@ -65,13 +76,17 @@ export interface AudioConnectionOptions {
 
 // ============= Event Callbacks =============
 
-export type EventType = 
+/** Raw `hangup` message from the server, with whatever fields it carries. */
+export type HangupPayload = Record<string, any>;
+
+export type EventType =
   | 'onAudioConnected'
   | 'onAudioDisconnected'
   | 'onUserConnected'
   | 'onUserDisconnected'
   | 'onMuteChanged'
   | 'onStatsUpdate'
+  | 'onHangup'
   | 'onError'
   | 'onLog';
 
@@ -84,6 +99,8 @@ export interface EventListeners {
   onUserDisconnected: EventCallback<boolean>[];
   onMuteChanged: EventCallback<boolean>[];
   onStatsUpdate: EventCallback<{ audio: AudioStats; sending: SendingStats }>[];
+  /** Server ended the call. Fires before `onAudioDisconnected`. */
+  onHangup: EventCallback<HangupPayload>[];
   onError: EventCallback<Error>[];
   onLog: EventCallback<{ message: string; type: 'info' | 'warning' | 'error' }>[];
 }

@@ -8,7 +8,13 @@ import { AudioContext, AudioBuffer, AudioBufferSourceNode, GainNode, AudioRecord
 import { Platform, PermissionsAndroid } from 'react-native';
 import { decode as atob, encode as btoa } from 'base-64';
 import { AudioProcessingConfig, AudioProcessingMode } from '../types';
-import { DEFAULT_CONFIG } from '../config/constants';
+import {
+  DEFAULT_CONFIG,
+  TRANSPORT_PROFILES,
+  resolveTransportProfile,
+  samplesPerPacket,
+  type TransportProfile,
+} from '../config/constants';
 import VocalLabsAudioEffects, { type AudioEffectsStatus, type NativeAudioChunkEvent } from '../utils/VocalLabsAudioEffects';
 
 interface AudioStats {
@@ -27,7 +33,11 @@ interface SendingStats {
   lastSentTime: number;
   isRecording: boolean;
   isMuted: boolean;
+  /** Capture/send rate. */
   sampleRate: number;
+  /** Rate the server streams back at — not necessarily `sampleRate`. */
+  receiveSampleRate: number;
+  receiveFormat: AudioFormat;
   bufferSize: number;
   isAudioInitialized: boolean;
 }
@@ -50,12 +60,20 @@ type LogCallback = (message: string, type: LogType) => void;
 type ConnectionCallback = (connected: boolean) => void;
 type MuteCallback = (muted: boolean) => void;
 type UserConnectedCallback = (connected: boolean) => void;
+type HangupCallback = (message: Record<string, any>) => void;
 
 class ReactNativeAudioQueue {
-  private static readonly INPUT_SAMPLE_RATE = 8000;
+  /** Playback context rate — the rate the SERVER sends at, not the capture rate. */
   private sampleRate: number;
+  /** Rate of the stream currently arriving; defaults to the negotiated receive rate. */
   private inputSampleRate: number;
+  /** Negotiated fallbacks, used whenever a media frame omits its own format/rate. */
+  private readonly negotiatedReceiveRate: number;
+  private readonly negotiatedFormat: AudioFormat;
   private isLittleEndianL16: boolean;
+  /** Trailing byte of an L16 payload that ended mid-sample. See base64ToPCMData. */
+  private pendingByte: number | null = null;
+  private lastRateMismatchLogTime: number = 0;
   private audioContext: AudioContext | null;
   private initializePromise: Promise<void> | null;
   private currentSourceNode: AudioBufferSourceNode | null;
@@ -85,10 +103,14 @@ class ReactNativeAudioQueue {
   private audioFormat: AudioFormat = 'audio/x-l16';
   private droppedFrames: number = 0;
 
-  constructor(sampleRate: number = 8000) {
-    this.sampleRate = sampleRate;
-    this.inputSampleRate = ReactNativeAudioQueue.INPUT_SAMPLE_RATE;
-    this.isLittleEndianL16 = false;
+  constructor(profile: TransportProfile) {
+    // Playback runs at the server's rate, never at the capture rate.
+    this.sampleRate = profile.receiveRate;
+    this.inputSampleRate = profile.receiveRate;
+    this.negotiatedReceiveRate = profile.receiveRate;
+    this.negotiatedFormat = profile.receiveFormat;
+    this.audioFormat = profile.receiveFormat;
+    this.isLittleEndianL16 = profile.receiveFormat === 'audio/x-l16';
     this.audioContext = null;
     this.initializePromise = null;
     this.currentSourceNode = null;
@@ -451,30 +473,41 @@ class ReactNativeAudioQueue {
         return floatArray;
       }
 
-      // ---------- L16 (KEEP YOURS) ----------
-      const byteLength = bytes.length;
+      // ---------- L16 ----------
+      // A payload can carry an odd number of bytes, splitting a 16-bit sample
+      // across two frames. Carry the orphan byte into the next payload —
+      // dropping it byte-shifts every sample after it into noise.
+      let data = bytes;
 
-      if (byteLength % 2 === 0) {
-        const samples = byteLength / 2;
-        const floatArray = new Float32Array(samples);
-
-        for (let i = 0; i < samples; i++) {
-          const idx = i * 2;
-
-          const hi = this.isLittleEndianL16 ? bytes[idx + 1] : bytes[idx];
-          const lo = this.isLittleEndianL16 ? bytes[idx] : bytes[idx + 1];
-          const sample = (hi << 8) | lo;
-          const signedSample = sample > 32767 ? sample - 65536 : sample;
-
-          floatArray[i] = signedSample / 32768;
-        }
-
-        return floatArray;
+      if (this.pendingByte !== null) {
+        const merged = new Uint8Array(data.length + 1);
+        merged[0] = this.pendingByte;
+        merged.set(data, 1);
+        data = merged;
+        this.pendingByte = null;
       }
 
-      const floatArray = new Float32Array(byteLength);
-      for (let i = 0; i < byteLength; i++) {
-        floatArray[i] = (bytes[i] - 128) / 128;
+      if (data.length % 2 === 1) {
+        this.pendingByte = data[data.length - 1];
+        data = data.subarray(0, data.length - 1);
+      }
+
+      if (data.length === 0) {
+        return null;
+      }
+
+      const samples = data.length / 2;
+      const floatArray = new Float32Array(samples);
+
+      for (let i = 0; i < samples; i++) {
+        const idx = i * 2;
+
+        const hi = this.isLittleEndianL16 ? data[idx + 1] : data[idx];
+        const lo = this.isLittleEndianL16 ? data[idx] : data[idx + 1];
+        const sample = (hi << 8) | lo;
+        const signedSample = sample > 32767 ? sample - 65536 : sample;
+
+        floatArray[i] = signedSample / 32768;
       }
 
       return floatArray;
@@ -485,21 +518,31 @@ class ReactNativeAudioQueue {
     }
   }
 
-  setAudioFormat(contentType: string, sampleRate?: number): void {
-    const normalizedContentType = (contentType || 'audio/x-l16').toLowerCase();
+  /**
+   * Apply the format of an incoming media frame. Anything the frame does not
+   * state falls back to the negotiated transport, never to a hardcoded default
+   * — assuming L16 on a mulaw transport decodes to static.
+   */
+  setAudioFormat(contentType?: string, sampleRate?: number): void {
+    const normalizedContentType = (contentType || '').toLowerCase();
 
+    let nextFormat: AudioFormat;
     if (normalizedContentType.includes('mulaw') || normalizedContentType.includes('pcmu')) {
-      this.audioFormat = 'audio/x-mulaw';
+      nextFormat = 'audio/x-mulaw';
+    } else if (normalizedContentType.includes('l16') || normalizedContentType.includes('pcm')) {
+      nextFormat = 'audio/x-l16';
     } else {
-      this.audioFormat = 'audio/x-l16';
+      nextFormat = this.negotiatedFormat;
     }
 
-    if (this.audioFormat === 'audio/x-l16') {
-      // User confirmed all L16 is little-endian
-      this.isLittleEndianL16 = true;
-    } else {
-      this.isLittleEndianL16 = false;
+    if (nextFormat !== this.audioFormat) {
+      // A codec switch invalidates any half sample we were holding.
+      this.pendingByte = null;
+      this.audioFormat = nextFormat;
     }
+
+    // All L16 from this server is little-endian.
+    this.isLittleEndianL16 = nextFormat === 'audio/x-l16';
 
     const rateMatch = normalizedContentType.match(/(?:rate|sample[-_]?rate)\s*=\s*(\d{4,6})/);
     const parsedRate = rateMatch ? Number(rateMatch[1]) : NaN;
@@ -507,9 +550,32 @@ class ReactNativeAudioQueue {
 
     if (Number.isFinite(candidateRate) && candidateRate >= 4000 && candidateRate <= 96000) {
       this.inputSampleRate = candidateRate;
+      if (candidateRate !== this.negotiatedReceiveRate) {
+        this.logRateMismatch(candidateRate);
+      }
     } else {
-      this.inputSampleRate = ReactNativeAudioQueue.INPUT_SAMPLE_RATE;
+      this.inputSampleRate = this.negotiatedReceiveRate;
     }
+  }
+
+  private logRateMismatch(actualRate: number): void {
+    const nowMs = Date.now();
+    if (nowMs - this.lastRateMismatchLogTime < 10000) {
+      return;
+    }
+    this.lastRateMismatchLogTime = nowMs;
+    console.warn(
+      `⚠️ Server is streaming ${actualRate}Hz but the transport negotiated ${this.negotiatedReceiveRate}Hz. ` +
+        `Following the frame; playback would be ${(actualRate / this.negotiatedReceiveRate).toFixed(4)}x off otherwise.`
+    );
+  }
+
+  /**
+   * Drop continuity state tied to one socket. Called on a human transfer, where
+   * the playback queue is deliberately kept alive across the swap.
+   */
+  resetIncomingStream(): void {
+    this.pendingByte = null;
   }
 
   setVolume(volume: number): void {
@@ -536,6 +602,7 @@ class ReactNativeAudioQueue {
     this.nextPlayTime = 0;
     this.receivedChunks = 0;
     this.playedChunks = 0;
+    this.pendingByte = null;
   }
 
   async dispose(): Promise<void> {
@@ -576,7 +643,11 @@ export class AudioQueueService {
   public isConnected: boolean;
   public isMuted: boolean;
   private isRecording: boolean;
-  private sampleRate: number;
+  /** Capture/send rate. Independent of the rate the server streams back. */
+  private sendRate: number;
+  private transport: TransportProfile;
+  /** Samples left over from the last capture buffer, held to keep 20ms framing exact. */
+  private sendResidual: Int16Array;
   private transferBaseUrl: string;
   
   // Statistics
@@ -591,6 +662,7 @@ export class AudioQueueService {
   private connectionCallback: ConnectionCallback | null;
   private muteCallback: MuteCallback | null;
   private userConnectedCallback: UserConnectedCallback | null;
+  private hangupCallback: HangupCallback | null;
   
   // Audio stream
   private audioStreamBuffer: any[];
@@ -656,7 +728,10 @@ export class AudioQueueService {
     this.isConnected = false;
     this.isMuted = false;
     this.isRecording = false;
-    this.sampleRate = 8000; // Hardcoded to 8000 Hz
+    // Replaced by the URL-negotiated profile in connectWithCustomUrl().
+    this.transport = TRANSPORT_PROFILES[DEFAULT_CONFIG.SAMPLE_RATE];
+    this.sendRate = this.transport.sendRate;
+    this.sendResidual = new Int16Array(0);
     this.transferBaseUrl = DEFAULT_CONFIG.TRANSFER_BASE_URL;
     
     this.sentChunks = 0;
@@ -668,7 +743,8 @@ export class AudioQueueService {
     this.connectionCallback = null;
     this.muteCallback = null;
     this.userConnectedCallback = null;
-    
+    this.hangupCallback = null;
+
     this.audioStreamBuffer = [];
     this.audioRecorder = null;
     this.nativeChunkUnsubscribe = null;
@@ -681,7 +757,7 @@ export class AudioQueueService {
   }
 
   initializeAudioQueue(): void {
-    this.audioQueue = new ReactNativeAudioQueue(8000);
+    this.audioQueue = new ReactNativeAudioQueue(this.transport);
   }
 
   // Callback setters
@@ -703,6 +779,10 @@ export class AudioQueueService {
 
   setUserConnectedCallback(callback: UserConnectedCallback): void {
     this.userConnectedCallback = callback;
+  }
+
+  setHangupCallback(callback: HangupCallback): void {
+    this.hangupCallback = callback;
   }
 
   log(message: string, type: LogType = 'info'): void {
@@ -745,6 +825,11 @@ export class AudioQueueService {
         return;
       }
 
+      if (message.event === 'hangup') {
+        this.handleHangup(message);
+        return;
+      }
+
       if (message.event === 'playAudio' && message.media && message.media.payload && this.audioQueue) {
         try {
           if (!this.hasReceivedFirstData && !(/^A+=*$/.test(message.media.payload))) {
@@ -761,11 +846,11 @@ export class AudioQueueService {
         }
         
         try {
-          // Detect and set audio format
-          const contentType = message.media.contentType || 'audio/x-l16';
+          // Detect and set audio format. Pass contentType through as-is —
+          // an absent one must fall back to the negotiated codec, not to L16.
           const incomingRate = typeof message.media.sampleRate === 'number' ? message.media.sampleRate : undefined;
           if (this.audioQueue) {
-            this.audioQueue.setAudioFormat(contentType, incomingRate);
+            this.audioQueue.setAudioFormat(message.media.contentType, incomingRate);
           }
         } catch (formatError) {
           console.error('❌ Error setting audio format:', formatError);
@@ -854,12 +939,13 @@ export class AudioQueueService {
         }
       }
 
-      // Hardcode to 8000 Hz, 320 bytes per packet (160 samples = 20ms)
-      const bufferSize = 160;
+      // One 20ms packet at the capture rate: 160/320/640/960 samples,
+      // i.e. 320/640/1280/1920 bytes of mono little-endian L16.
+      const bufferSize = samplesPerPacket(this.sendRate);
 
       if (Platform.OS === 'android' && VocalLabsAudioEffects.isAvailable()) {
         const started = await VocalLabsAudioEffects.startNativeRecording({
-          sampleRate: 8000,
+          sampleRate: this.sendRate,
           bufferLength: bufferSize,
           channelCount: 1,
         });
@@ -873,13 +959,14 @@ export class AudioQueueService {
 
           this.isRecording = true;
           this.audioStreamBuffer = [];
+          this.sendResidual = new Int16Array(0);
           this.nativeAudioEffectsInitialized = VocalLabsAudioEffects.isActive();
           console.log('✅ Native Android recording started with built-in audio effects');
           return;
         }
       }
       
-      console.log(`🎤 Recording Configuration - Sample Rate: 8000Hz, Buffer Size: ${bufferSize} samples (320 raw bytes)`);
+      console.log(`🎤 Recording Configuration - Sample Rate: ${this.sendRate}Hz, Buffer Size: ${bufferSize} samples (${bufferSize * 2} raw bytes)`);
 
       if (!this.audioRecorder) {
         this.audioRecorder = new AudioRecorder();
@@ -896,7 +983,7 @@ export class AudioQueueService {
 
       const onAudioReadyResult = this.audioRecorder.onAudioReady(
         {
-          sampleRate: 8000,
+          sampleRate: this.sendRate,
           bufferLength: bufferSize,
           channelCount: 1,
         },
@@ -916,7 +1003,8 @@ export class AudioQueueService {
       
       this.isRecording = true;
       this.audioStreamBuffer = [];
-      
+      this.sendResidual = new Int16Array(0);
+
       // Initialize native audio effects (Android only)
       if (Platform.OS === 'android' && VocalLabsAudioEffects.isAvailable()) {
         try {
@@ -1005,7 +1093,7 @@ export class AudioQueueService {
         return;
       }
 
-      const resampled = this.resampleFloat32(mono, buffer.sampleRate, this.sampleRate);
+      const resampled = this.resampleFloat32(mono, buffer.sampleRate, this.sendRate);
       if (resampled.length === 0) {
         return;
       }
@@ -1050,7 +1138,7 @@ export class AudioQueueService {
 
       const downmixed = this.downmixInt16ToMono(pcmInt16, event.channelCount || 1);
       const float = this.int16ToFloat32(downmixed);
-      const resampled = this.resampleFloat32(float, event.sampleRate || 8000, this.sampleRate);
+      const resampled = this.resampleFloat32(float, event.sampleRate || this.sendRate, this.sendRate);
       const int16 = this.float32ToInt16(resampled);
       this.sendInt16Frames(int16);
     } catch (error) {
@@ -1145,18 +1233,39 @@ export class AudioQueueService {
     return output;
   }
 
+  /**
+   * Emit whole 20ms packets at the capture rate, holding the remainder for the
+   * next buffer. Resampling an arbitrary device rate down to the send rate
+   * rarely lands on a packet boundary, and emitting the short tail as its own
+   * packet would put a runt frame on the wire every buffer.
+   */
   private sendInt16Frames(samples: Int16Array): void {
-    const samplesPerPacket = 160;
-    for (let i = 0; i < samples.length; i += samplesPerPacket) {
-      const slice = samples.subarray(i, Math.min(i + samplesPerPacket, samples.length));
+    const packetSamples = samplesPerPacket(this.sendRate);
+
+    let pending: Int16Array;
+    if (this.sendResidual.length > 0) {
+      pending = new Int16Array(this.sendResidual.length + samples.length);
+      pending.set(this.sendResidual, 0);
+      pending.set(samples, this.sendResidual.length);
+    } else {
+      pending = samples;
+    }
+
+    let offset = 0;
+    while (pending.length - offset >= packetSamples) {
+      const slice = pending.subarray(offset, offset + packetSamples);
       const frameBase64 = this.samplesToBase64(slice);
 
       if (frameBase64) {
         if (!this.sendAudioChunk(frameBase64)) {
-          console.warn(`⚠️ Failed to send packet at offset ${i}`);
+          console.warn(`⚠️ Failed to send packet at offset ${offset}`);
         }
       }
+      offset += packetSamples;
     }
+
+    // slice() copies — `pending` may be a view onto a transient capture buffer.
+    this.sendResidual = offset < pending.length ? pending.slice(offset) : new Int16Array(0);
   }
 
   sendAudioChunk(base64AudioData: string): boolean {
@@ -1179,7 +1288,7 @@ export class AudioQueueService {
         event: 'media',
         media: {
           contentType: 'audio/x-l16',
-          sampleRate: 8000,
+          sampleRate: this.sendRate,
           payload: base64AudioData
         }
       };
@@ -1243,6 +1352,7 @@ export class AudioQueueService {
 
         this.isRecording = false;
         this.audioStreamBuffer = [];
+        this.sendResidual = new Int16Array(0);
         // Keep AVAudioSession active across calls — see disconnect() comment.
         console.log('✅ Microphone capture stopped');
         this.log('Recording stopped', 'info');
@@ -1255,14 +1365,22 @@ export class AudioQueueService {
   }
 
   async connectWithCustomUrl(wsUrl: string, transferBaseUrl?: string) {
-    // Hardcode sending sample rate to 8000 Hz
-    this.sampleRate = 8000;
+    // The `_web_<rate>` token names the capture rate; the server streams back at
+    // its own rate and codec. Both come from the profile — never derive one
+    // from the other.
+    this.transport = resolveTransportProfile(wsUrl);
+    this.sendRate = this.transport.sendRate;
+    this.sendResidual = new Int16Array(0);
+
     if (transferBaseUrl) {
       this.transferBaseUrl = transferBaseUrl;
     }
 
-    console.log(`🎯 Hardcoded Sample Rate: 8000Hz`);
-    
+    console.log(
+      `🎯 Transport negotiated — send ${this.transport.sendRate}Hz audio/x-l16, ` +
+        `receive ${this.transport.receiveRate}Hz ${this.transport.receiveFormat}`
+    );
+
     // Clean up old WebSocket
     if (this.ws) {
       this.ws.onopen = null;
@@ -1303,12 +1421,12 @@ export class AudioQueueService {
             streamId: 'inbound',
             mediaFormat: {
               Encoding: 'audio/x-l16',
-              sampleRate: 8000
+              sampleRate: this.sendRate
             }
           }
         };
         this.ws?.send(JSON.stringify(startEvent));
-        console.log(`📤 Sent start event with sample rate: 8000Hz`);
+        console.log(`📤 Sent start event with sample rate: ${this.sendRate}Hz`);
         
         // Send hangup_source event
         const hangupEvent = {
@@ -1381,6 +1499,30 @@ export class AudioQueueService {
   }
 
   /**
+   * The server ended the call. Notify the app first — the teardown that follows
+   * flips connection state and would otherwise land before the reason for it.
+   */
+  private handleHangup(message: WebSocketMessage): void {
+    console.log('📴 Server signalled hangup');
+    this.log('Call ended by server', 'info');
+
+    if (this.hangupCallback) {
+      try {
+        this.hangupCallback(message as Record<string, any>);
+      } catch (error) {
+        this.log(`Error in hangup callback: ${error}`, 'error');
+      }
+    }
+
+    // notifyServer: false — the server hung up, so echoing an `end` back at it
+    // would report a user-initiated hangup for a call it already terminated.
+    this.disconnect(false).catch((error) => {
+      console.error('❌ Error tearing down after hangup:', error);
+      this.log(`Hangup teardown error: ${error}`, 'error');
+    });
+  }
+
+  /**
    * Hand the live call off to a human agent. Opens a new socket for `humanId`,
    * routes audio to it, then quietly closes the previous socket. Recording, the
    * playback queue, and connection state are left untouched so the call continues.
@@ -1414,7 +1556,7 @@ export class AudioQueueService {
       throw new Error('missing humanId');
     }
     const base = this.transferBaseUrl.split('?')[0];
-    return `${base}?callId=${encodeURIComponent(humanId)}&sampleRate=${this.sampleRate}`;
+    return `${base}?callId=${encodeURIComponent(humanId)}&sampleRate=${this.sendRate}`;
   }
 
   /**
@@ -1448,13 +1590,17 @@ export class AudioQueueService {
             event: 'start',
             start: {
               streamId: 'inbound',
-              mediaFormat: { Encoding: 'audio/x-l16', sampleRate: 8000 },
+              mediaFormat: { Encoding: 'audio/x-l16', sampleRate: this.sendRate },
             },
           }));
           newWs.send(JSON.stringify({ event: 'hangup_source', source: 'in_progress' }));
         } catch (error) {
           this.log(`Error sending transfer handshake: ${error}`, 'error');
         }
+
+        // The playback queue survives the swap, but a half sample held from the
+        // old socket does not belong to the new stream.
+        this.audioQueue?.resetIncomingStream();
 
         // Route audio to the new socket and wire its handlers *before* tearing
         // down the old one, so no media is lost mid-swap.
@@ -1521,10 +1667,14 @@ export class AudioQueueService {
 
 
 
-  async disconnect(): Promise<void> {
+  /**
+   * @param notifyServer Send an `end` event before closing. Pass false when the
+   *   server is the one that ended the call.
+   */
+  async disconnect(notifyServer: boolean = true): Promise<void> {
     console.log('🔌 Disconnecting...');
     this.log('Starting disconnect', 'info');
-    
+
     // Remove WebSocket listeners
     if (this.ws) {
       this.ws.onopen = null;
@@ -1532,9 +1682,9 @@ export class AudioQueueService {
       this.ws.onclose = null;
       this.ws.onerror = null;
     }
-    
+
     // Send end event before closing
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (notifyServer && this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(JSON.stringify({ event: 'end', reason: 'user' }));
         console.log('📤 Sent end event');
@@ -1566,6 +1716,7 @@ export class AudioQueueService {
     this.totalSentBytes = 0;
     this.lastSentTime = 0;
     this.audioStreamBuffer = [];
+    this.sendResidual = new Int16Array(0);
     this.hasReceivedFirstData = false;
 
     // NOTE: do not deactivate iOS AVAudioSession here. react-native-audio-api's input
@@ -1605,7 +1756,9 @@ export class AudioQueueService {
       lastSentTime: this.lastSentTime,
       isRecording: this.isRecording,
       isMuted: this.isMuted,
-      sampleRate: this.sampleRate,
+      sampleRate: this.sendRate,
+      receiveSampleRate: this.transport.receiveRate,
+      receiveFormat: this.transport.receiveFormat,
       bufferSize: this.audioStreamBuffer.length,
       isAudioInitialized: this.isAudioInitialized
     };

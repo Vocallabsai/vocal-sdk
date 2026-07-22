@@ -6,15 +6,15 @@
  * @example
  * import VocalLabsSDK from 'vocal-native-sdk';
  * 
- * const sdk = new VocalLabsSDK({
- *   sampleRate: 8000,
- *   enableLogs: true,
- * });
- * 
- * // Connect with websocket URL
- * await sdk.connect('wss://call.vocallabs.ai/ws/?agent=..._callId_web_8000');
+ * const sdk = new VocalLabsSDK({ enableLogs: true });
+ *
+ * // The audio rate is negotiated from the URL, not from SDKConfig. The
+ * // `_web_<rate>` token names the CAPTURE rate; the server streams back at its
+ * // own rate and codec (see TRANSPORT_PROFILES). `_web_32000` is recommended:
+ * // L16 both ways, and no 44.1kHz playback for the device to resample.
+ * await sdk.connect('wss://call.vocallabs.ai/ws/?agent=..._callId_web_32000');
  * // or
- * await sdk.connect('wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=8000');
+ * await sdk.connect('wss://rupture2.vocallabs.ai/ws?callId=test-call-123&sampleRate=32000');
  * 
  * // Toggle mute
  * sdk.toggleMute();
@@ -68,6 +68,7 @@ export class VocalLabsSDK {
     onUserDisconnected: [],
     onMuteChanged: [],
     onStatsUpdate: [],
+    onHangup: [],
     onError: [],
     onLog: [],
   };
@@ -133,6 +134,18 @@ export class VocalLabsSDK {
 
     this.audioManager.onStatsUpdate((stats) => {
       this._emit('onStatsUpdate', stats);
+    });
+
+    this.audioManager.onHangup((message) => {
+      // Emit before clearing so listeners can still read getCurrentCall().
+      // The audio layer tears itself down right after this returns, which is
+      // what fires onAudioDisconnected — hence hangup always lands first.
+      this._emit('onHangup', message);
+
+      this.callManager.clearCurrentCall();
+      this.state.isConnected = false;
+      this.state.currentCallId = null;
+      this.state.isMuted = false;
     });
   }
 

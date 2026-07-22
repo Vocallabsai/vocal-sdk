@@ -12,6 +12,7 @@ import {
   ErrorCode,
   AudioProcessingConfig,
   AudioProcessingMode,
+  HangupPayload,
 } from '../types';
 import { Logger } from '../utils/logger';
 import { AudioQueueService } from './AudioQueueService';
@@ -28,6 +29,7 @@ export class AudioManager {
   private onMuteChangedCallback?: (isMuted: boolean) => void;
   private onUserConnectedCallback?: (connected: boolean) => void;
   private onStatsUpdateCallback?: (stats: { audio: AudioStats; sending: SendingStats }) => void;
+  private onHangupCallback?: (message: HangupPayload) => void;
 
   constructor(logger: Logger) {
     this.logger = logger;
@@ -68,6 +70,11 @@ export class AudioManager {
     this.audioService.setUserConnectedCallback((connected: boolean) => {
       this.logger.info(`👤 User connected: ${connected}`);
       this.onUserConnectedCallback?.(connected);
+    });
+
+    this.audioService.setHangupCallback((message: HangupPayload) => {
+      this.logger.info('📴 Call ended by server');
+      this.onHangupCallback?.(message);
     });
 
     this.audioService.setStatsCallback((_stats: any) => {
@@ -261,6 +268,10 @@ export class AudioManager {
 
   onStatsUpdate(callback: (stats: { audio: AudioStats; sending: SendingStats }) => void) {
     this.onStatsUpdateCallback = callback;
+  }
+
+  onHangup(callback: (message: HangupPayload) => void) {
+    this.onHangupCallback = callback;
   }
 
   /**
