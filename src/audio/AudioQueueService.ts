@@ -11,8 +11,10 @@ import { AudioProcessingConfig, AudioProcessingMode } from '../types';
 import {
   DEFAULT_CONFIG,
   TRANSPORT_PROFILES,
-  resolveTransportProfile,
+  resolveTransportAsync,
   samplesPerPacket,
+  type ResolveTransportOptions,
+  type ResolvedTransport,
   type TransportProfile,
 } from '../config/constants';
 import VocalLabsAudioEffects, { type AudioEffectsStatus, type NativeAudioChunkEvent } from '../utils/VocalLabsAudioEffects';
@@ -53,6 +55,21 @@ interface WebSocketMessage {
   name?: string;
 }
 
+/**
+ * A decoded frame together with the rate it was decoded at.
+ *
+ * The rate MUST travel with the samples. Resampling reads
+ * `contextRate / inputSampleRate`, and `inputSampleRate` tracks the last rate
+ * the server declared — so a rate change while frames are waiting in the queue
+ * would resample that backlog by the new ratio and pitch-shift audio that was
+ * captured at the old one. Barely audible when the queue held ~0 frames; a
+ * clearly alien burst once a jitter buffer holds a few hundred ms.
+ */
+interface QueuedFrame {
+  samples: Float32Array;
+  rate: number;
+}
+
 type LogType = 'info' | 'error' | 'warning';
 type AudioFormat = 'audio/x-l16' | 'audio/x-mulaw';
 type StatsCallback = (stats: { sentChunks: number; receivedChunks: number; queueSize: number }) => void;
@@ -86,22 +103,66 @@ class ReactNativeAudioQueue {
   private playedChunks: number;
   
   // Buffering for continuous playback - OPTIMIZED FOR MOBILE
-  private playbackQueue: Float32Array[] = [];
+  private playbackQueue: QueuedFrame[] = [];
   private isProcessingQueue: boolean;
   private nextPlayTime: number;
+  /**
+   * Base jitter buffer depth in seconds — the starting cushion, and the floor
+   * the adaptive target never drops below.
+   */
   public targetLatency: number;
-  private static readonly MAX_QUEUE_FRAMES = 20; // Keep queue short and predictable
+  /**
+   * The cushion actually in force. Starts at `targetLatency` and grows on every
+   * underrun, because a buffer that keeps running dry is a buffer that is too
+   * small for this connection's jitter. Refilling to the same depth that just
+   * failed only buys another stall a second later.
+   */
+  private currentPrebuffer: number = 0.2;
+  /** Extra depth for the very first fill: Android's audio session is still settling. */
+  private static readonly FIRST_FILL_BONUS = 0.1;
+  private static readonly UNDERRUN_STEP = 0.06;
+  private static readonly MAX_PREBUFFER = 0.45;
+  private hasFilledOnce: boolean = false;
+  /**
+   * The server does not send 20ms packets — observed frames are 60-130 samples,
+   * i.e. 2-5ms each. One AudioBufferSourceNode per frame would mean ~300 nodes
+   * and ~300 `onended` hops across the bridge every second, which on Android
+   * costs more than the audio it schedules. Frames are merged up to this much
+   * audio per node instead.
+   */
+  private static readonly COALESCE_SECONDS = 0.06;
+  /** Hard cap on buffered audio. Beyond this the oldest frames are dropped. */
+  private static readonly MAX_BUFFERED_SECONDS = 1.0;
   private static readonly MAX_SCHEDULE_AHEAD = 0.5;
+  /** Bounds work per processQueue() call; the schedule-ahead window is the real limit. */
+  private static readonly MAX_NODES_PER_PASS = 8;
+  /** Seconds of audio sitting in playbackQueue, kept in step with pushes/shifts. */
+  private queuedSeconds: number = 0;
+  /**
+   * True while filling the jitter buffer. Nothing is scheduled until
+   * `targetLatency` of audio is queued, so network jitter has a cushion to eat
+   * into. Set again whenever the queue runs dry, which is also what an
+   * end-of-utterance looks like.
+   */
+  private isPrebuffering: boolean = true;
+  /** Quiet period after which a partial buffer is played out rather than held. */
+  private static readonly FLUSH_IDLE_MS = 250;
+  private lastChunkAtMs: number = 0;
   private queueProcessTimer: any = null; // Fallback queue processor
   private lastOverflowLogTime: number = 0;
   private overflowSuppressedCount: number = 0;
   private lastAheadDropLogTime: number = 0;
+  private lastUnderrunLogTime: number = 0;
+  private underrunCount: number = 0;
   
   // Mobile-specific optimizations
   public maxQueueSize: number = 4;
   public isLowLatencyMode: boolean = false;
   private audioFormat: AudioFormat = 'audio/x-l16';
   private droppedFrames: number = 0;
+  private firstChunkLogged: boolean = false;
+  /** Last rate the server actually declared. Sticky across frames that omit it. */
+  private serverDeclaredRate: number | null = null;
 
   constructor(profile: TransportProfile) {
     // Playback runs at the server's rate, never at the capture rate.
@@ -120,11 +181,17 @@ class ReactNativeAudioQueue {
     
     this.receivedChunks = 0;
     this.playedChunks = 0;
+    this.firstChunkLogged = false;
+    this.serverDeclaredRate = null;
     
     this.playbackQueue = [];
     this.isProcessingQueue = false;
     this.nextPlayTime = 0;
+    this.queuedSeconds = 0;
+    this.isPrebuffering = true;
     this.targetLatency = 0.2;
+    this.currentPrebuffer = this.targetLatency;
+    this.hasFilledOnce = false;
   }
 
   async initialize(): Promise<void> {
@@ -180,9 +247,25 @@ class ReactNativeAudioQueue {
     // Lower frequency fallback keeps CPU lower while onended handles most draining.
     this.queueProcessTimer = setInterval(() => {
       try {
-        if (this.playbackQueue.length > 0 && !this.isProcessingQueue) {
-          this.processQueue();
+        if (this.playbackQueue.length === 0 || this.isProcessingQueue) {
+          return;
         }
+
+        // An utterance shorter than the prebuffer target — or the tail left over
+        // after an underrun — would otherwise sit in the queue forever waiting
+        // for a cushion that no more audio is coming to fill. Once the stream
+        // has been quiet this long, play out what we have.
+        if (
+          this.isPrebuffering &&
+          Date.now() - this.lastChunkAtMs >= ReactNativeAudioQueue.FLUSH_IDLE_MS
+        ) {
+          this.isPrebuffering = false;
+          if (this.audioContext) {
+            this.nextPlayTime = this.audioContext.currentTime;
+          }
+        }
+
+        this.processQueue();
       } catch (error) {
         console.error('❌ Error in fallback queue processor:', error);
       }
@@ -198,7 +281,9 @@ class ReactNativeAudioQueue {
         ? ` (suppressed ${this.overflowSuppressedCount} similar warnings)`
         : '';
       console.warn(
-        `⚠️ Queue full (${this.playbackQueue.length}/${ReactNativeAudioQueue.MAX_QUEUE_FRAMES}), dropping oldest frame. Total dropped: ${this.droppedFrames}${suffix}`
+        `⚠️ Queue over ${ReactNativeAudioQueue.MAX_BUFFERED_SECONDS}s ` +
+        `(${(this.queuedSeconds * 1000).toFixed(0)}ms buffered), dropping oldest frame. ` +
+        `Total dropped: ${this.droppedFrames}${suffix}`
       );
       this.lastOverflowLogTime = nowMs;
       this.overflowSuppressedCount = 0;
@@ -220,15 +305,48 @@ class ReactNativeAudioQueue {
       this.receivedChunks++;
 
       if (!this.isInitialized || !this.audioContext) {
+        // Every chunk that arrives before initialize() resolves lands here, so
+        // this must stay silent — logging it once per chunk buried the console
+        // under ~200 identical lines. initialize() logs the outcome itself.
         await this.initialize();
-        if (this.audioContext) {
-          this.nextPlayTime = this.audioContext.currentTime;
-          console.log(`✅ Initialized - AudioContext state: ${this.audioContext.state}, nextPlayTime: ${this.nextPlayTime}`);
-        }
       }
 
       const pcmData = this.base64ToPCMData(base64Audio);
       if (!pcmData) return;
+
+      // One-shot forensic dump of the first real frame. Everything needed to tell
+      // a rate problem from a scheduling problem, in one place:
+      //   - what the server said vs what we negotiated
+      //   - what AudioContext we actually got (Android often refuses the ask)
+      //   - the resample ratio that will be applied
+      // If `implied rate @20ms` disagrees with `decoding as`, the stream is not
+      // the rate we think it is and playback speed will be off by that factor.
+      if (!this.firstChunkLogged && pcmData.length > 0) {
+        this.firstChunkLogged = true;
+        const bytesPerSample = this.audioFormat === 'audio/x-mulaw' ? 1 : 2;
+        const byteLength = Math.ceil((base64Audio.length * 3) / 4);
+        const frameMs = (pcmData.length / this.inputSampleRate) * 1000;
+        const ctxRate = this.audioContext?.sampleRate ?? 0;
+        console.log(
+          '🔬 FIRST AUDIO CHUNK\n' +
+          `   base64 chars     : ${base64Audio.length}  (~${byteLength} bytes)\n` +
+          `   codec            : ${this.audioFormat} (${bytesPerSample} byte/sample)\n` +
+          `   samples decoded  : ${pcmData.length}\n` +
+          `   negotiated recv  : ${this.negotiatedReceiveRate} Hz\n` +
+          `   decoding as      : ${this.inputSampleRate} Hz` +
+            `${this.inputSampleRate !== this.negotiatedReceiveRate ? '  ← server overrode it' : ''}\n` +
+          // Framing is the server's choice and is not fixed — 2-5ms frames are
+          // normal. Do NOT infer the sample rate from one frame's length; an
+          // earlier version assumed 20ms packets here and cried rate mismatch
+          // on a stream that was perfectly in tune.
+          `   frame duration   : ${frameMs.toFixed(1)} ms  (server framing, not a rate signal)\n` +
+          `   AudioContext rate: ${ctxRate} Hz` +
+            `${ctxRate !== this.negotiatedReceiveRate ? '  ← device refused the requested rate' : ''}\n` +
+          `   resample ratio   : ${ctxRate ? (ctxRate / this.inputSampleRate).toFixed(4) : 'n/a'}x\n` +
+          `   jitter buffer    : ${(this.targetLatency * 1000).toFixed(0)} ms prebuffer, ` +
+            `${(ReactNativeAudioQueue.COALESCE_SECONDS * 1000).toFixed(0)} ms per node`
+        );
+      }
 
       // Drop if too much already scheduled
       const now = this.audioContext!.currentTime;
@@ -242,24 +360,35 @@ class ReactNativeAudioQueue {
         return;
       }
 
-      // More aggressive queue size limit to prevent memory buildup
-      if (this.playbackQueue.length >= ReactNativeAudioQueue.MAX_QUEUE_FRAMES) {
-        try {
-          this.playbackQueue.shift();
-          this.droppedFrames++;
-          this.logOverflowWarning();
-        } catch (dropError) {
-          console.error('❌ Error dropping frame:', dropError);
-          return;
-        }
+      // Tag the frame with the rate it was decoded at, here and now.
+      const frameRate = this.inputSampleRate;
+      this.playbackQueue.push({ samples: pcmData, rate: frameRate });
+      this.queuedSeconds += pcmData.length / frameRate;
+      this.lastChunkAtMs = Date.now();
+
+      // Cap the backlog by DURATION, not frame count. The old 20-frame cap was
+      // written for 20ms packets; against 3ms frames it capped the buffer at
+      // ~60ms and threw away audio the jitter buffer needs.
+      while (
+        this.queuedSeconds > ReactNativeAudioQueue.MAX_BUFFERED_SECONDS &&
+        this.playbackQueue.length > 1
+      ) {
+        const dropped = this.playbackQueue.shift();
+        if (!dropped) break;
+        this.queuedSeconds = Math.max(0, this.queuedSeconds - dropped.samples.length / dropped.rate);
+        this.droppedFrames++;
+        this.logOverflowWarning();
       }
 
-      this.playbackQueue.push(pcmData);
-      
       // Log status periodically to identify scheduling issues
       if (this.receivedChunks % 500 === 0) {
         const audioState = this.audioContext?.state;
-        console.log(`📊 Queue status: ${this.playbackQueue.length} frames | Played: ${this.playedChunks} | Received: ${this.receivedChunks} | AudioContext: ${audioState}`);
+        console.log(
+          `📊 Queue status: ${this.playbackQueue.length} frames / ${(this.queuedSeconds * 1000).toFixed(0)}ms | ` +
+          `Played: ${this.playedChunks} | Received: ${this.receivedChunks} | ` +
+          `Underruns: ${this.underrunCount} | Cushion: ${(this.prebufferTarget() * 1000).toFixed(0)}ms | ` +
+          `AudioContext: ${audioState}`
+        );
       }
       
       this.processQueue();
@@ -270,7 +399,7 @@ class ReactNativeAudioQueue {
     }
   }
 
-  scheduleOneFrame(pcmFloat32: Float32Array) {
+  scheduleOneFrame(pcmFloat32: Float32Array, frameRate?: number, sourceFrames: number = 1) {
     try {
       if (!this.audioContext) {
         console.warn('⚠️ AudioContext not available for scheduling');
@@ -286,7 +415,11 @@ class ReactNativeAudioQueue {
       }
 
       const contextRate = ctx.sampleRate || this.sampleRate;
-      const samples = this.convertForContextRate(pcmFloat32, contextRate);
+      const samples = this.convertForContextRate(
+        pcmFloat32,
+        contextRate,
+        frameRate ?? this.inputSampleRate
+      );
 
       // Validate samples
       if (!samples || samples.length === 0) {
@@ -332,10 +465,17 @@ class ReactNativeAudioQueue {
         source.start(startTime);
 
         this.nextPlayTime = startTime + buffer.duration;
-        this.playedChunks++;
-        
-        if (this.playedChunks % 500 === 0) {
-          console.log(`▶️ Scheduled frame ${this.playedChunks} at ${startTime.toFixed(3)}s | Queue: ${this.playbackQueue.length}`);
+        const before = this.playedChunks;
+        this.playedChunks += sourceFrames;
+
+        // Every 500 server frames, not every 500 nodes — coalescing means those
+        // are no longer the same thing.
+        if (Math.floor(before / 500) !== Math.floor(this.playedChunks / 500)) {
+          console.log(
+            `▶️ Scheduled frame ${this.playedChunks} at ${startTime.toFixed(3)}s | ` +
+            `Lead: ${((startTime - ctx.currentTime) * 1000).toFixed(0)}ms | ` +
+            `Queue: ${(this.queuedSeconds * 1000).toFixed(0)}ms`
+          );
         }
 
         source.onended = () => {
@@ -360,12 +500,16 @@ class ReactNativeAudioQueue {
     }
   }
 
-  private convertForContextRate(input: Float32Array, contextRate: number): Float32Array {
-    if (input.length === 0 || contextRate <= 0 || this.inputSampleRate <= 0 || contextRate === this.inputSampleRate) {
+  private convertForContextRate(
+    input: Float32Array,
+    contextRate: number,
+    inputRate: number
+  ): Float32Array {
+    if (input.length === 0 || contextRate <= 0 || inputRate <= 0 || contextRate === inputRate) {
       return input;
     }
 
-    const ratio = contextRate / this.inputSampleRate;
+    const ratio = contextRate / inputRate;
 
     // Common mobile path: 8k -> 48k.
     if (ratio === 6) {
@@ -399,35 +543,141 @@ class ReactNativeAudioQueue {
     return out;
   }
 
+  /**
+   * Pull up to `COALESCE_SECONDS` of audio off the queue as ONE array.
+   *
+   * Returns the source frame count alongside it so `playedChunks` keeps counting
+   * server frames and stays comparable with `receivedChunks`.
+   */
+  private takeCoalescedFrame(): { samples: Float32Array; rate: number; frames: number } | null {
+    if (this.playbackQueue.length === 0) {
+      return null;
+    }
+
+    // One node carries one rate, so a batch stops at any rate change.
+    const rate = this.playbackQueue[0].rate;
+    const maxSamples = Math.max(1, Math.round(ReactNativeAudioQueue.COALESCE_SECONDS * rate));
+
+    const taken: Float32Array[] = [];
+    let total = 0;
+
+    while (this.playbackQueue.length > 0) {
+      const head = this.playbackQueue[0];
+      if (head.rate !== rate) {
+        break;
+      }
+      // Always take at least one frame, even if it alone exceeds the budget.
+      if (taken.length > 0 && total + head.samples.length > maxSamples) {
+        break;
+      }
+      this.playbackQueue.shift();
+      taken.push(head.samples);
+      total += head.samples.length;
+      if (total >= maxSamples) {
+        break;
+      }
+    }
+
+    this.queuedSeconds = Math.max(0, this.queuedSeconds - total / rate);
+
+    if (taken.length === 1) {
+      return { samples: taken[0], rate, frames: 1 };
+    }
+
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const frame of taken) {
+      merged.set(frame, offset);
+      offset += frame.length;
+    }
+    return { samples: merged, rate, frames: taken.length };
+  }
+
+  /** Cushion required before playback (re)starts. Deeper on the first fill. */
+  private prebufferTarget(): number {
+    const base = Math.max(this.currentPrebuffer, this.targetLatency);
+    return this.hasFilledOnce ? base : base + ReactNativeAudioQueue.FIRST_FILL_BONUS;
+  }
+
+  private noteUnderrun(): void {
+    this.underrunCount++;
+
+    // Grow the cushion, but only for a dry-out that interrupts speech. A queue
+    // that empties after a quiet gap is just the end of an utterance, and
+    // inflating latency for those would make every reply arrive later for no
+    // reason.
+    const midSpeech = Date.now() - this.lastChunkAtMs < ReactNativeAudioQueue.FLUSH_IDLE_MS;
+    if (midSpeech) {
+      this.currentPrebuffer = Math.min(
+        ReactNativeAudioQueue.MAX_PREBUFFER,
+        Math.max(this.currentPrebuffer, this.targetLatency) + ReactNativeAudioQueue.UNDERRUN_STEP
+      );
+    }
+
+    const nowMs = Date.now();
+    // Draining is also what the end of an utterance looks like, so this is
+    // informational and heavily throttled rather than a warning per gap.
+    if (nowMs - this.lastUnderrunLogTime >= 10000) {
+      console.log(
+        `🔈 Playback buffer ran dry (${this.underrunCount} so far` +
+        `${midSpeech ? ', mid-speech' : ', end of utterance'}) — cushion now ` +
+        `${(this.prebufferTarget() * 1000).toFixed(0)}ms.`
+      );
+      this.lastUnderrunLogTime = nowMs;
+    }
+  }
+
   processQueue() {
     try {
       if (!this.audioContext) return;
-      
+
       if (this.isProcessingQueue) return;
 
       this.isProcessingQueue = true;
 
       const ctx = this.audioContext;
-      
+
       try {
+        // Hold everything back until there is a cushion to play out of.
+        // Without this, frames were scheduled the instant they landed, so the
+        // output followed network jitter exactly: every late packet became a
+        // silent gap. That is what the choppiness was.
+        if (this.isPrebuffering) {
+          if (this.queuedSeconds < this.prebufferTarget()) {
+            this.isProcessingQueue = false;
+            return;
+          }
+          this.isPrebuffering = false;
+          this.hasFilledOnce = true;
+          this.nextPlayTime = ctx.currentTime;
+        }
+
         // Bounded scheduling loop avoids recursive churn during bursty traffic.
         let scheduledCount = 0;
         while (this.playbackQueue.length > 0) {
           const now = ctx.currentTime;
+
           if (this.nextPlayTime < now) {
+            // The audio clock overtook us: the cushion is gone. Rebuild it
+            // instead of scheduling into the past, which only produced a gap
+            // and left us just as exposed to the next late packet.
+            this.noteUnderrun();
             this.nextPlayTime = now;
+            this.isPrebuffering = true;
+            break;
           }
+
           if (this.nextPlayTime - now > ReactNativeAudioQueue.MAX_SCHEDULE_AHEAD) {
             break;
           }
 
-          const frame = this.playbackQueue.shift();
-          if (!frame) break;
+          const batch = this.takeCoalescedFrame();
+          if (!batch) break;
 
-          this.scheduleOneFrame(frame);
+          this.scheduleOneFrame(batch.samples, batch.rate, batch.frames);
           scheduledCount++;
 
-          if (scheduledCount >= 3) {
+          if (scheduledCount >= ReactNativeAudioQueue.MAX_NODES_PER_PASS) {
             break;
           }
         }
@@ -436,7 +686,7 @@ class ReactNativeAudioQueue {
         this.isProcessingQueue = false;
         return;
       }
-      
+
       this.isProcessingQueue = false;
     } catch (outerError) {
       console.error('❌ Critical error in processQueue:', outerError);
@@ -549,12 +799,26 @@ class ReactNativeAudioQueue {
     const candidateRate = typeof sampleRate === 'number' && sampleRate > 0 ? sampleRate : parsedRate;
 
     if (Number.isFinite(candidateRate) && candidateRate >= 4000 && candidateRate <= 96000) {
+      if (candidateRate !== this.inputSampleRate) {
+        console.log(
+          `🎚️ Incoming rate now ${candidateRate}Hz (was ${this.inputSampleRate}Hz, negotiated ${this.negotiatedReceiveRate}Hz)`
+        );
+      }
       this.inputSampleRate = candidateRate;
+      this.serverDeclaredRate = candidateRate;
       if (candidateRate !== this.negotiatedReceiveRate) {
         this.logRateMismatch(candidateRate);
       }
     } else {
-      this.inputSampleRate = this.negotiatedReceiveRate;
+      // This frame carried no rate. That is NOT a signal to change anything —
+      // servers commonly declare the rate on the first frame (or on a format
+      // change) and omit it thereafter. Resetting to the negotiated rate here
+      // made `inputSampleRate` oscillate between two values mid-stream, and
+      // since every frame is resampled by `contextRate / inputSampleRate`, the
+      // ratio flipped frame to frame: audio that is intermittently too fast,
+      // too slow, and full of discontinuities at the frame joins.
+      // Stick with whatever the server last told us.
+      this.inputSampleRate = this.serverDeclaredRate ?? this.negotiatedReceiveRate;
     }
   }
 
@@ -600,8 +864,16 @@ class ReactNativeAudioQueue {
     this.isPlaying = false;
     this.isProcessingQueue = false;
     this.nextPlayTime = 0;
+    this.queuedSeconds = 0;
+    this.isPrebuffering = true;
+    this.currentPrebuffer = this.targetLatency;
+    this.hasFilledOnce = false;
+    this.lastChunkAtMs = 0;
+    this.underrunCount = 0;
     this.receivedChunks = 0;
     this.playedChunks = 0;
+    this.firstChunkLogged = false;
+    this.serverDeclaredRate = null;
     this.pendingByte = null;
   }
 
@@ -647,6 +919,7 @@ export class AudioQueueService {
   private sendRate: number;
   private transport: TransportProfile;
   /** Samples left over from the last capture buffer, held to keep 20ms framing exact. */
+  private lastTransport: ResolvedTransport | null = null;
   private sendResidual: Int16Array;
   private transferBaseUrl: string;
   
@@ -904,7 +1177,11 @@ export class AudioQueueService {
 
   async startRecording(): Promise<void> {
     console.log('🎤 Starting microphone capture with AudioRecorder...');
-    
+
+    // The socket this start belongs to. Permission prompts and native setup are
+    // async, so it can close underneath us — see the guard at the end.
+    const startedForWs = this.ws;
+
     try {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         const errorMsg = 'Cannot start recording - WebSocket not connected';
@@ -962,6 +1239,7 @@ export class AudioQueueService {
           this.sendResidual = new Int16Array(0);
           this.nativeAudioEffectsInitialized = VocalLabsAudioEffects.isActive();
           console.log('✅ Native Android recording started with built-in audio effects');
+          await this.stopIfSocketGone(startedForWs);
           return;
         }
       }
@@ -1035,12 +1313,33 @@ export class AudioQueueService {
       }
       
       console.log('✅ AudioRecorder capture started');
-      
+      await this.stopIfSocketGone(startedForWs);
+
     } catch (error) {
       const errorMsg = `Error starting microphone capture: ${error}`;
       console.error('❌ ' + errorMsg);
       this.log(errorMsg, 'error');
     }
+  }
+
+  /**
+   * Undo a start whose socket died while it was still starting.
+   *
+   * `onclose`/`onerror` only call `stopRecording()` when `isRecording` is already
+   * true, and the eager start on `ws.onopen` means it usually is not yet. A
+   * socket rejected right after the start event (close 1006) therefore left the
+   * microphone running with nowhere to send — an endless "WebSocket not ready,
+   * dropping audio data" — and the leaked capture session then made the NEXT
+   * call's recorder report no audio session id, silently costing it AEC/NS.
+   */
+  private async stopIfSocketGone(startedForWs: WebSocket | null): Promise<boolean> {
+    if (this.ws === startedForWs && startedForWs?.readyState === WebSocket.OPEN) {
+      return false;
+    }
+
+    console.warn('⚠️ WebSocket closed while recording was starting — stopping the microphone');
+    await this.stopRecording();
+    return true;
   }
 
   private samplesToBase64(samples: Int16Array): string {
@@ -1364,11 +1663,19 @@ export class AudioQueueService {
     }
   }
 
-  async connectWithCustomUrl(wsUrl: string, transferBaseUrl?: string) {
-    // The `_web_<rate>` token names the capture rate; the server streams back at
-    // its own rate and codec. Both come from the profile — never derive one
-    // from the other.
-    this.transport = resolveTransportProfile(wsUrl);
+  async connectWithCustomUrl(
+    wsUrl: string,
+    transferBaseUrl?: string,
+    transportOptions?: ResolveTransportOptions
+  ) {
+    // The network chooses the rate unless the URL pins one with `sampleRate=<n>`.
+    // The URL comes back rewritten so the server lands on the same profile —
+    // the server streams back at its own rate and codec, and a mismatch plays
+    // the incoming audio at the wrong speed rather than failing outright.
+    const resolved = await resolveTransportAsync(wsUrl, transportOptions ?? {});
+    this.transport = resolved.profile;
+    this.lastTransport = resolved;
+    wsUrl = resolved.url;
     this.sendRate = this.transport.sendRate;
     this.sendResidual = new Int16Array(0);
 
@@ -1797,6 +2104,11 @@ export class AudioQueueService {
     
     this.log('Service disposal complete', 'info');
     console.log('✅ AudioQueueService disposed');
+  }
+
+  /** The transport resolved for the live call — rate, codec, URL and why. */
+  getTransportInfo(): (ResolvedTransport & { url: string }) | null {
+    return this.lastTransport;
   }
 
   getStats() {

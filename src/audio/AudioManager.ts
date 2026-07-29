@@ -114,10 +114,11 @@ export class AudioManager {
     this.logger.info(`Connecting to websocket: ${options.wsUrl}`);
 
     try {
-      await this.audioService.connectWithCustomUrl(
-        options.wsUrl,
-        options.transferBaseUrl
-      );
+      await this.audioService.connectWithCustomUrl(options.wsUrl, options.transferBaseUrl, {
+        pinnedRate:        options.sampleRate,
+        autoTransport:     options.autoTransport,
+        networkRatePicker: options.networkRatePicker,
+      });
 
       this.logger.info('✅ Audio connection successful');
 
@@ -240,6 +241,11 @@ export class AudioManager {
   /**
    * Get audio stats
    */
+  /** The transport resolved for the live call — rate, codec, URL and why. */
+  getTransportInfo() {
+    return this.audioService.getTransportInfo();
+  }
+
   getStats(): { audio: AudioStats; sending: SendingStats } {
     return {
       audio: this.audioService.getStats(),

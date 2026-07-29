@@ -1,3 +1,5 @@
+import type { NetworkRatePicker } from '../config/networkRate';
+
 /**
  * VocalLabs SDK Types
  * All TypeScript interfaces and types for the SDK
@@ -7,12 +9,36 @@
 
 export interface SDKConfig {
   /**
-   * @deprecated Not applied. The transport rate is negotiated from the call URL
-   * (`_web_<rate>` token, or a `sampleRate` query param), which is the server's
-   * contract — a client-side override would desync the two. Falls back to 8000
-   * when the URL carries neither.
+   * Pin the transport rate to one of 8000 | 16000 | 32000 | 48000.
+   *
+   * Leave it unset — the default — and the SDK picks from network conditions at
+   * connect time, ignoring whatever rate the call URL's `_web_<rate>` token
+   * names. Set it and that choice is skipped entirely.
+   *
+   * Either way the URL's token is rewritten to match, because the server reads
+   * its outbound rate and codec from it; letting the two disagree plays the
+   * incoming stream at `receiveRate / sendRate` speed.
    */
   sampleRate?: number;
+
+  /**
+   * Select a transport at connect time — from `sampleRate` if set, otherwise
+   * from the network — and rewrite the URL's `_web_<rate>` token to match.
+   * Default true.
+   *
+   * Set false to leave the URL completely untouched and use the rate the URL
+   * already names (or `sampleRate` if you set one). That is the opt-out: it
+   * also means the client and server can end up on different rates, which
+   * plays the incoming stream at the wrong speed.
+   */
+  autoTransport?: boolean;
+
+  /**
+   * Supply your own rate selection instead of reading NetInfo. Same contract as
+   * `setNetworkRatePicker`, but scoped to this SDK instance.
+   */
+  networkRatePicker?: NetworkRatePicker;
+
   enableLogs?: boolean;
   audioProcessing?: AudioProcessingConfig;
   /** Base WS URL used when a `human-transfer` event hands the call to an agent. */
@@ -70,6 +96,8 @@ export interface SendingStats {
 
 export interface AudioConnectionOptions {
   sampleRate?: number;
+  autoTransport?: boolean;
+  networkRatePicker?: NetworkRatePicker;
   wsUrl: string;
   transferBaseUrl?: string;
 }

@@ -16,3 +16,12 @@ export { AudioManager } from './audio/AudioManager';
 // Export utilities
 export { Logger } from './utils/logger';
 export { DEFAULT_CONFIG } from './config/constants';
+
+// Network-based rate selection (`_web_anysamplerate`)
+export {
+  AUTO_RATE_FALLBACK,
+  pickTransportRateFromNetwork,
+  rateFromNetInfoState,
+  setNetworkRatePicker,
+} from './config/networkRate';
+export type { NetworkRatePick, NetworkRatePicker, TransportRate } from './config/networkRate';

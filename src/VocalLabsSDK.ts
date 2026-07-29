@@ -50,7 +50,7 @@ export class VocalLabsSDK {
   private logger: Logger;
 
   // Configuration
-  private config: SDKConfig & { sampleRate: number; enableLogs: boolean; transferBaseUrl: string };
+  private config: SDKConfig & { enableLogs: boolean; transferBaseUrl: string };
 
   // State
   private state: SDKState = {
@@ -76,7 +76,10 @@ export class VocalLabsSDK {
   constructor(config?: SDKConfig) {
     // Setup configuration with defaults
     this.config = {
-      sampleRate: config?.sampleRate || DEFAULT_CONFIG.SAMPLE_RATE,
+      // Deliberately not defaulted: undefined means "let the network decide".
+      sampleRate: config?.sampleRate,
+      autoTransport: config?.autoTransport,
+      networkRatePicker: config?.networkRatePicker,
       enableLogs: config?.enableLogs !== false,
       audioProcessing: config?.audioProcessing,
       transferBaseUrl: config?.transferBaseUrl || DEFAULT_CONFIG.TRANSFER_BASE_URL,
@@ -206,6 +209,8 @@ export class VocalLabsSDK {
       // Connect audio with websocket URL
       await this.audioManager.connect({
         sampleRate: this.config.sampleRate,
+        autoTransport: this.config.autoTransport,
+        networkRatePicker: this.config.networkRatePicker,
         wsUrl: websocketUrl,
         transferBaseUrl: this.config.transferBaseUrl,
       });
@@ -349,6 +354,14 @@ export class VocalLabsSDK {
   /**
    * Get audio statistics
    */
+  /**
+   * What transport the live call settled on: rates, codec, the URL actually
+   * opened, and `pick` explaining the network choice (null when pinned).
+   */
+  getTransportInfo() {
+    return this.audioManager.getTransportInfo();
+  }
+
   getStats(): { audio: AudioStats | null; sending: SendingStats | null } {
     return this.audioManager.getStats();
   }
